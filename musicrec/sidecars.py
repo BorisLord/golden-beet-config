@@ -144,11 +144,23 @@ def apply(snapfile, db, clean_root, dump, do_apply, log=None):
 
 
 def prune_shells(src, dump, do_apply, log=None):
-    """Imported-album shells (leaf source dirs with files but NO audio left) -> quarantine, one folder/album."""
+    """Imported-album shells (source dirs whose ENTIRE subtree has no audio left) -> quarantine, one
+    folder per album. Bottom-up audio scan, then take the TOPMOST audio-empty dir, so a leftover
+    subfolder (Scans/, @eaDir/...) moves WITH its parent shell instead of on its own. Folders that
+    still hold audio (skipped albums) stay in source."""
     log = _log(log)
-    targets = [dp for dp, dirs, files in os.walk(src)
-               if dp != str(src) and not dirs and files
-               and not any(Path(f).suffix.lower() in AUDIO for f in files)]
+    src = str(src)
+    has_audio = {}
+    for dp, dirs, files in os.walk(src, topdown=False):
+        has_audio[dp] = (any(Path(f).suffix.lower() in AUDIO for f in files)
+                         or any(has_audio.get(str(Path(dp) / d), False) for d in dirs))
+    targets = []
+    for dp, dirs, files in os.walk(src):
+        if dp == src or has_audio.get(dp, False) or not (files or dirs):
+            continue
+        parent = str(Path(dp).parent)
+        if parent == src or has_audio.get(parent, False):   # topmost audio-empty dir -> the album shell
+            targets.append(dp)
     moved = 0
     for dp in targets:
         dpath = Path(dp)

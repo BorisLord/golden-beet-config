@@ -80,6 +80,31 @@ class TestSidecars(Base):
         self.assertEqual((dump / "Alb" / "cover.jpg").read_text(), "OLD")                # original kept
         self.assertFalse(shell.exists())                                                 # emptied shell removed
 
+    def test_prune_shells_quarantines_shell_with_subdir(self):
+        # imported shell: no audio anywhere, but has a Scans/ subfolder + parasites -> WHOLE tree quarantined
+        shell = self.tmp / "src" / "Alb"
+        (shell / "Scans").mkdir(parents=True)
+        (shell / "Scans" / "booklet.jpg").write_text("b")
+        (shell / "release.nfo").write_text("n")
+        (shell / "Thumbs.db").write_text("t")
+        n = sidecars.prune_shells(str(self.tmp / "src"), str(self.tmp / "dump"), True)
+        self.assertEqual(n, 1)                                          # the shell, not the subfolder, counted
+        dump = self.tmp / "dump" / "Alb"
+        self.assertTrue((dump / "release.nfo").exists())
+        self.assertTrue((dump / "Scans" / "booklet.jpg").exists())     # subfolder moved WITH its parent shell
+        self.assertFalse(shell.exists())                               # source shell removed
+
+    def test_prune_shells_keeps_folder_that_still_has_audio(self):
+        # a skipped album (audio still present anywhere in its subtree) must NOT be quarantined
+        alb = self.tmp / "src" / "Skipped"
+        (alb / "Disc 1").mkdir(parents=True)
+        (alb / "Disc 1" / "01 - s.flac").write_text("x")
+        (alb / "cover.jpg").write_text("c")
+        n = sidecars.prune_shells(str(self.tmp / "src"), str(self.tmp / "dump"), True)
+        self.assertEqual(n, 0)
+        self.assertTrue((alb / "Disc 1" / "01 - s.flac").exists())     # left in source
+        self.assertFalse((self.tmp / "dump" / "Skipped").exists())
+
     def test_safe_move_failure_is_logged_not_raised(self):
         import logging
         ok = sidecars.safe_move(self.tmp / "does-not-exist.mp3", self.tmp / "dest.mp3", logging.getLogger("t"))

@@ -20,15 +20,12 @@ def run(cfg, src=None) -> int:
     if not src.is_dir():
         log.error("source missing: %s", src)
         return 1
-    if not cfg.overlay("fetchart-fs.yaml").exists():
-        log.error("overlay missing: %s -- run `musicrec init`", cfg.overlay("fetchart-fs.yaml"))
-        return 1
     backup_db(cfg, "rebuild", log)
     dedup(str(src), str(cfg.dump), True, log)                       # drop duplicate audio (best bitrate kept) first
     snap = tempfile.NamedTemporaryFile(prefix="sidecars-", suffix=".json", delete=False).name  # noqa: SIM115
     try:
         sidecars.snapshot(str(src), snap, log)                      # capture sidecars while source has its audio
-        rc, _ = run_beet(cfg, ["import", "-q", "-i", str(src)], overlay="fetchart-fs.yaml", passname="import")
+        rc, _ = run_beet(cfg, ["import", "-q", "-i", str(src)], passname="import")  # auto: art+genres+rg+scrub
         if rc:
             log.error("beet import failed (rc=%d)", rc)
         sidecars.apply(snap, str(cfg.library), str(cfg.clean), str(cfg.dump), True, log)  # carry into clean
@@ -36,7 +33,8 @@ def run(cfg, src=None) -> int:
         prune_empty_dirs(src)
     finally:
         Path(snap).unlink(missing_ok=True)
-    covers = len(list(cfg.clean.rglob("cover.jpg"))) if cfg.clean.exists() else 0
+    art_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    covers = sum(1 for p in cfg.clean.rglob("cover.*") if p.suffix.lower() in art_exts) if cfg.clean.exists() else 0
     log.info("items: %d | albums: %d | covers: %d",
              count_items(cfg, ["ls"]), count_items(cfg, ["ls", "-a"]), covers)
     return rc
