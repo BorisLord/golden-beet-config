@@ -51,7 +51,9 @@ musicbrainz:
 # python3-discogs-client lib (beets[discogs] extra) + a personal access token. source_weight penalises
 # Discogs candidates so MusicBrainz still wins ties; AcoustID/chroma matching stays MB-only (it's MB-keyed).
 discogs:
-  user_token: REPLACE_ME   # https://www.discogs.com/settings/developers -> "Generate new token"
+  # personal access token: https://www.discogs.com/settings/developers -> "Generate new token".
+  # Keep the placeholder ALONE on its line (no trailing comment) so a `user_token: REPLACE_ME` rewrite matches.
+  user_token: REPLACE_ME
   data_source_mismatch_penalty: 0.5   # penalise Discogs candidates so MusicBrainz wins ties (0..1)
 
 match:
