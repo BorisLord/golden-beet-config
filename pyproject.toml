@@ -1,7 +1,7 @@
 # gbc — single Python orchestration app driving beets (engine) via subprocess.
 # Install as a CLI:  uv tool install --editable .   ->  `gbc` on PATH (cron calls `gbc inbox`).
 [project]
-name = "golden-beet-config"
+name = "golden-beets-config"
 version = "0.6.0"
 description = "Recover a chaotic music library into a clean album library (beets-driven pipeline)."
 requires-python = ">=3.11"

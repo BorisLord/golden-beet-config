@@ -1,4 +1,4 @@
-# golden-beet-config
+# golden-beets-config
 
 Turn a chaotic music library — tens of thousands of loose, mis-tagged files — into a clean **album**
 library you can serve with any player (Navidrome, Jellyfin, Plex, any Subsonic/DLNA).
@@ -7,9 +7,9 @@ At its core is a documented [beets](https://beets.io) config for album-mode reco
 (`gbc`) wraps it with the orchestration a config can't express (dedup, sidecars, QA, format conversion). Albums are matched by **AcoustID audio fingerprint** + tags — robust to duplicate track
 numbers, download-batch folders and untitled rips, because the source folder structure is ignored.
 
-## Golden beet config
+## Golden beets config
 
-[`golden-beet-config.yaml`](golden-beet-config.yaml) is that config: one beets config for the recovery
+[`golden-beets-config.yaml`](golden-beets-config.yaml) is that config: one beets config for the recovery
 described here, every setting commented:
 
 - **Album mode + AcoustID** — identify by audio content, not by file/folder names.
@@ -29,7 +29,7 @@ value. The `gbc` CLI adds the rest (below).
 ## Quick start
 
 ```bash
-git clone <repo-url> && cd golden-beet-config
+git clone <repo-url> && cd golden-beets-config
 ./setup.sh     # checks deps, installs beets + the gbc CLI (via uv), deploys the config (+ optional cron)
 gbc run        # run the pipeline: import → qa
 ```

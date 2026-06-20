@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  golden-beet-config  —  a beets config for album-mode music recovery
+#  golden-beets-config  —  a beets config for album-mode music recovery
 # ─────────────────────────────────────────────────────────────────────────────
 # A drop-in `~/.config/beets/config.yaml` for ONE job: turn a chaotic, mis-tagged
 # music dump into a clean ALBUM library you can serve with any player (Navidrome,
@@ -18,7 +18,7 @@
 #   `pip install beets[chroma,fetchart,lastgenre]`, install fpcalc + ffmpeg, then
 #   `beet import /path/to/messy/music`.
 #
-# CAVEAT — this file is the *config*; the full recovery tool (golden-beet-config /
+# CAVEAT — this file is the *config*; the full recovery tool (golden-beets-config /
 #   `gbc`) adds the orchestration a config alone can't express: pre-import dedup
 #   (keep best bitrate), carrying official sidecars into the album, a read-only QA
 #   audit (integrity, lossy<192k, junk metadata, RIFF-in-.mp3 detection), and
