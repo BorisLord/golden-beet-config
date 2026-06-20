@@ -29,3 +29,6 @@ dist/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Claude Code reads CLAUDE.md, not AGENTS.md -> local-only bridge (`@AGENTS.md`); repo stays tool-agnostic
+CLAUDE.md

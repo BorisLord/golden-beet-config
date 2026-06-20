@@ -1,4 +1,4 @@
-# CLAUDE.md — golden-beet-config (operational brief)
+# AGENTS.md — golden-beet-config (operational brief)
 
 Always check the official documentation. Every feature must be tested. Keep everything logical and
 well-coded (good practices).
