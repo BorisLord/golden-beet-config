@@ -6,9 +6,25 @@ directory: ~/Music/beetsPipeline/clean   # setup.sh patches this from config.env
 
 # All these run automatically during import (auto: yes, configured below); duplicates/unimported/zero/
 # missing/mbsync/bareasc stay command-only for manual use.
-plugins: musicbrainz chroma fetchart embedart lastgenre replaygain scrub ftintitle duplicates unimported zero missing mbsync bareasc
+plugins: musicbrainz chroma fetchart embedart lastgenre replaygain scrub ftintitle duplicates unimported zero missing mbsync bareasc types
 # NOTE: `musicbrainz` MUST be listed -- it's a separate metadata-source plugin; without it `chroma`
 #       produces NO MusicBrainz candidates and matching finds nothing.
+
+# Declare the numeric AcousticBrainz flex attributes (gbc acousticbrainz pass) as floats so range
+# queries work -- e.g. `beet ls mood_relaxed:0.9..` or `danceable:0.7..`. Without this beets stores
+# them as text and numeric ranges silently match nothing. (bpm + initial_key are native typed fields;
+# the string flex attrs -- moods_mirex, voice_instrumental -- stay text and need no declaration.)
+types:
+  danceable: float
+  key_strength: float
+  tonal: float
+  mood_acoustic: float
+  mood_aggressive: float
+  mood_electronic: float
+  mood_happy: float
+  mood_party: float
+  mood_relaxed: float
+  mood_sad: float
 
 import:
   move: yes          # matched albums MOVE to MUSIC_CLEAN; non-imported files stay in source (the leftover pile)

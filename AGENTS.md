@@ -14,9 +14,10 @@ complete, strong albums are kept — loose singletons stay parked in the source 
 ## Architecture (one core, several doors)
 
 `gbc run` (manual) and `gbc inbox` (cron, on drop) call the **same** pipeline
-(`gbc/passes/pipeline.py`: **import → verify → qa**). beets does art/genres/replaygain/scrub/ftintitle
+(`gbc/passes/pipeline.py`: **import → verify → acousticbrainz → qa**). beets does art/genres/replaygain/scrub/ftintitle
 **natively during `beet import`** (`auto: yes` in `config.yaml`); gbc only adds **dedup** (before
-import) + **sidecars** (after) + **verify** (AcoustID imposter -> quarantine) + **qa/anomaly** (audit). Passes in `gbc/passes/`; beets driven
+import) + **sidecars** (after) + **verify** (AcoustID imposter -> quarantine) + **acousticbrainz**
+(network-only BPM/key/mood enrichment) + **qa/anomaly** (audit). Passes in `gbc/passes/`; beets driven
 through `beets.run_beet` (captures stdout **and stderr** — beet logs its `--pretend` plan to stderr);
 config in `config.py`; single logger in `logs.py`; import lock (filelock) in `lock.py`; incremental
 watermark (scopes qa) in `state.py`. `setup.sh` is the only bash (deps + `uv tool install --editable .` + `gbc init`).
@@ -59,6 +60,19 @@ Paths come from `config.env` (copy of `config.env.example`, gitignored) — use 
 - **Rate-limiting is NOT the cause of skips** (0 real 429/503 over 10k+ evaluations); skips = weak match +
   quiet mode refusing to guess. No personal AcoustID key needed (non-commercial use is free).
 - **WMA** format is stored as "Windows Media" → query `format::Windows`, not `format:WMA`.
+- **AcousticBrainz is frozen, not dead.** No new submissions since 2022, but the read API
+  (`acousticbrainz.org/api/v1/{low,high}-level?recording_ids=`) still serves every recording it analysed;
+  keyed by `mb_trackid`, coverage is high on our MB-matched library (sample lib = 100%). So `acousticbrainz`
+  is a cheap network-only pass — NOT `beets-xtractor`/Essentia (local DSP, must compile, CPU-heavy, only
+  wins on non-MB tracks we don't keep). We do NOT use beets' built-in `acousticbrainz` plugin: it is
+  deprecated and writes `initial_key` as "F# major", which beets' `MusicalKey` type mangles to "F"
+  (regex `[\W\s]+major` eats the `#`) — our pass emits canonical "F#"/"F#m" so the sharp+mode survive.
+- **acousticbrainz keeps a CURATED 14-field subset, not AB's full payload.** `bpm`+`initial_key` ->
+  file tags (Subsonic-visible); the 7 `mood_*` + `danceable` + `tonal` + `key_strength` (floats, typed
+  via the `types` plugin so `mood_relaxed:0.9..` ranges work) + `moods_mirex` + `voice_instrumental`
+  (strings) -> db flex attrs. We deliberately DROP AB's noise: the 4 genre taxonomies (unreliable +
+  owned by MusicBrainz/lastgenre), gender, timbre, ballroom rhythm, chord stats, average_loudness
+  (redundant with ReplayGain), and all low-level DSP descriptors. Don't re-add them without a use case.
 
 ## Secrets
 

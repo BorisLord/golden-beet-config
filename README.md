@@ -41,25 +41,26 @@ stay in `source/` to curate. For other paths, edit `config.env` (created by setu
 ## Commands
 
 ```
-gbc run [--all] [--reimport]   pipeline now (import → verify → qa); --all re-checks all, --reimport re-tries seen folders
+gbc run [--all] [--reimport]   pipeline now (import → verify → acousticbrainz → qa); --all re-checks all, --reimport re-tries seen folders
 gbc inbox               cron door: import a fresh drop if anything is new, then the pipeline
 gbc import [SOURCE] [--reimport]   album-match import only (--reimport re-tries already-seen folders)
 gbc qa [QUERY]          read-only technical audit + anomaly scan
 gbc anomaly [QUERY]     read-only name/anomaly scan only
 gbc verify [QUERY]      quarantine imposter tracks (audio ≠ tagged recording) via AcoustID
+gbc acousticbrainz [QUERY]   fetch BPM/key/mood metadata from AcousticBrainz (network-only; bpm+key → file tags)
 gbc convert             normalise formats in the clean lib: WMA→AAC, WAV/AIFF→FLAC (originals → quarantine)
 gbc init [--cron]       (re)deploy config + beets overlays (+ schedule cron)
 gbc uninstall [--purge] remove the tooling (never your music)
 ```
 
-**Incremental by default:** `run`/`inbox` keep a watermark of the last successful run, so verify + qa only
-check what's new (import is incremental via beets). `--all` re-checks everything; the first run has no
-watermark and covers the whole library.
+**Incremental by default:** `run`/`inbox` keep a watermark of the last successful run, so verify +
+acousticbrainz + qa only touch what's new (import is incremental via beets). `--all` re-checks everything;
+the first run has no watermark and covers the whole library.
 
 ## How it works
 
-`gbc run` = **import → verify → qa** (`library.db` is backed up first). `run` (manual) and `inbox` (cron)
-call the **same** pipeline — only the trigger and scope differ.
+`gbc run` = **import → verify → acousticbrainz → qa** (`library.db` is backed up first). `run` (manual)
+and `inbox` (cron) call the **same** pipeline — only the trigger and scope differ.
 
 **Import** — per source folder:
 

@@ -2,7 +2,7 @@
 # Install as a CLI:  uv tool install --editable .   ->  `gbc` on PATH (cron calls `gbc inbox`).
 [project]
 name = "golden-beet-config"
-version = "0.5.0"
+version = "0.6.0"
 description = "Recover a chaotic music library into a clean album library (beets-driven pipeline)."
 requires-python = ">=3.11"
 dependencies = ["filelock>=3.12", "pyacoustid>=1.3"]
