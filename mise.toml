@@ -1,4 +1,4 @@
-# Tooling backbone (mirrors gemini-bridge): pinned tools + tasks.
+# Tooling backbone: pinned tools + tasks.
 #   mise install   then   mise run test | lint | fix | audit
 [tools]
 python = "3.13"
@@ -14,7 +14,7 @@ description = "Run the unit tests (stdlib unittest, no pytest)"
 run = "uv run python -m unittest discover -s tests -t . -v"
 
 [tasks.lint]
-description = "Lint gbc + tests (ruff, gemini-bridge rule set)"
+description = "Lint gbc + tests (ruff)"
 run = "ruff check gbc tests"
 
 [tasks.fix]

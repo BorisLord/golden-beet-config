@@ -1,4 +1,4 @@
-# Lint config — same rule set as the gemini-bridge backbone.
+# Lint config for gbc + tests.
 # helpers/ are legacy standalone WMA-art tools (compact one-liner style); they are syntax-checked by the
 # test-suite (py_compile) rather than linted under the strict set.
 line-length = 120
