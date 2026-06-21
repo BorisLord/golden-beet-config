@@ -1,4 +1,7 @@
 import json
+import shutil
+import subprocess
+import typing
 import unittest
 from unittest import mock
 
@@ -44,13 +47,23 @@ class TestMapping(unittest.TestCase):
 
 
 class TestRun(Base):
-    def _run(self, mbids, fetch):
-        """Drive run() with a fake `beet` (ls -> mbids, modify -> recorded) and a stubbed _fetch."""
+    def _run(self, mbids, fetch, path_map=None):
+        """Drive run() with a fake `beet` (ls -> mbids, modify -> recorded) and a stubbed _fetch.
+
+        path_map: optional {mbid: filepath} for the flex-tag injection `ls -f $mb_trackid\\t$path` query.
+        When provided, the second ls call returns tab-separated mbid+path lines; otherwise it returns
+        bare mbids (the old behaviour, which still passes because os.path.isfile rejects non-existent paths).
+        """
         calls = []
 
         def fake_run_beet(cfg, args, **k):
             calls.append(args)
             if args and args[0] == "ls":
+                fmt = args[2] if len(args) > 2 else ""
+                if "\\t" in fmt or "\t" in fmt:
+                    if path_map:
+                        return 0, "\n".join(f"{m}\t{path_map[m]}" for m in mbids if m in path_map)
+                    return 0, ""
                 return 0, "\n".join(mbids)
             return 0, ""
 
@@ -94,6 +107,97 @@ class TestRun(Base):
     def test_no_mbids_in_scope(self):
         n, _ = self._run([], lambda batch: {})
         self.assertEqual(n, 0)
+
+    def test_flex_tag_ls_query_uses_comma_separated_mbids(self):
+        """After modify, run() issues a batch `ls -f $mb_trackid\\t$path` with comma-joined mbids."""
+        path_map = {"mbA": "/nonexistent/path.flac"}
+        _, calls = self._run(["mbA"], lambda batch: {"mbA": DOC}, path_map=path_map)
+        flex_ls = [c for c in calls if c and c[0] == "ls" and any("\\t" in str(a) or "\t" in str(a) for a in c)]
+        self.assertEqual(len(flex_ls), 1)
+        query_arg = next(a for a in flex_ls[0] if "mb_trackid:" in str(a))
+        self.assertIn("mb_trackid:mbA", query_arg)
+
+    def test_mutagen_absent_does_not_crash(self):
+        """When mutagen is not installed, run() still succeeds (flex attrs stay db-only)."""
+        with mock.patch("importlib.util.find_spec", return_value=None):
+            n, calls = self._run(["mbA"], lambda batch: {"mbA": DOC})
+        self.assertEqual(n, 1)
+        self.assertTrue(any(c and c[0] == "modify" for c in calls))
+
+
+_FFMPEG = shutil.which("ffmpeg")
+
+
+@unittest.skipUnless(_FFMPEG, "ffmpeg not available")
+class TestWriteFileTags(Base):
+    """Unit tests for _write_file_tags using real audio files created by ffmpeg."""
+
+    _FLEX: typing.ClassVar[dict] = {"mood_relaxed": 0.95, "danceable": 0.42, "voice_instrumental": "vocal"}
+
+    def _make(self, fmt):
+        """Create a 0.1s silent audio file; return its path."""
+        p = str(self.tmp / f"test.{fmt}")
+        if fmt == "flac":
+            subprocess.run([_FFMPEG, "-y", "-f", "lavfi", "-i",
+                            "anullsrc=r=44100:cl=mono", "-t", "0.1", "-c:a", "flac", p],
+                           capture_output=True, check=True)
+        elif fmt == "mp3":
+            subprocess.run([_FFMPEG, "-y", "-f", "lavfi", "-i",
+                            "anullsrc=r=44100:cl=mono", "-t", "0.1", "-c:a", "libmp3lame", p],
+                           capture_output=True, check=True)
+        elif fmt == "m4a":
+            subprocess.run([_FFMPEG, "-y", "-f", "lavfi", "-i",
+                            "anullsrc=r=44100:cl=mono", "-t", "0.1", "-c:a", "aac", p],
+                           capture_output=True, check=True)
+        return p
+
+    def _log(self):
+        return mock.MagicMock()
+
+    def test_flac_vorbis_comments(self):
+        p = self._make("flac")
+        self.assertTrue(ab._write_file_tags(p, self._FLEX, self._log()))
+        from mutagen.flac import FLAC
+        tags = FLAC(p)
+        self.assertEqual(tags["mood_relaxed"], ["0.95"])
+        self.assertEqual(tags["danceable"], ["0.42"])
+        self.assertEqual(tags["voice_instrumental"], ["vocal"])
+
+    def test_mp3_txxx_frames(self):
+        p = self._make("mp3")
+        self.assertTrue(ab._write_file_tags(p, self._FLEX, self._log()))
+        from mutagen.id3 import ID3
+        tags = ID3(p)
+        self.assertEqual(str(tags["TXXX:mood_relaxed"]), "0.95")
+        self.assertEqual(str(tags["TXXX:danceable"]), "0.42")
+        self.assertEqual(str(tags["TXXX:voice_instrumental"]), "vocal")
+
+    def test_m4a_freeform_atoms(self):
+        p = self._make("m4a")
+        self.assertTrue(ab._write_file_tags(p, self._FLEX, self._log()))
+        from mutagen.mp4 import MP4
+        tags = MP4(p)
+        self.assertEqual(tags["----:com.apple.itunes:mood_relaxed"], [b"0.95"])
+        self.assertEqual(tags["----:com.apple.itunes:danceable"], [b"0.42"])
+        self.assertEqual(tags["----:com.apple.itunes:voice_instrumental"], [b"vocal"])
+
+    def test_unsupported_format_returns_false(self):
+        p = str(self.tmp / "test.wav")
+        subprocess.run([_FFMPEG, "-y", "-f", "lavfi", "-i",
+                        "anullsrc=r=44100:cl=mono", "-t", "0.1", p],
+                       capture_output=True, check=True)
+        self.assertFalse(ab._write_file_tags(p, self._FLEX, self._log()))
+
+    def test_idempotent_rewrite(self):
+        """Writing the same flex attrs twice doesn't duplicate TXXX frames."""
+        p = self._make("mp3")
+        ab._write_file_tags(p, {"mood_relaxed": 0.5}, self._log())
+        ab._write_file_tags(p, {"mood_relaxed": 0.9}, self._log())
+        from mutagen.id3 import ID3
+        tags = ID3(p)
+        txxx_frames = [k for k in tags if k.startswith("TXXX:mood_relaxed")]
+        self.assertEqual(len(txxx_frames), 1)
+        self.assertEqual(str(tags["TXXX:mood_relaxed"]), "0.9")
 
 
 if __name__ == "__main__":

@@ -11,20 +11,26 @@ We DON'T use beets' built-in `acousticbrainz` plugin: it is deprecated (logs "Th
 since AcousticBrainz has shut down") and could vanish from a future beets. Instead we hit the same public
 API ourselves and write a CURATED SUBSET of its canonical field names (ABSCHEME below -- only the useful
 ones: moods, danceability, voice/instrumental, key). `bpm` and `initial_key` are real media fields ->
-written into the file tags (a Subsonic/Navidrome player sees them); the moods/danceability classifiers
-are non-standard -> stored as beets flexible attributes (db + sidecars; typed via the `types` plugin so
-`mood_relaxed:0.9..` ranges work), queryable but not shown by players.
+written into the file tags by beets' own mediafile (a Subsonic/Navidrome player sees them); the
+moods/danceability classifiers are non-standard -> stored as beets flexible attributes (typed via the
+`types` plugin so `mood_relaxed:0.9..` ranges work). Since beets' mediafile silently skips flex attrs
+on the file side (no tag frame mapping), we additionally inject them as standard custom-tag frames via
+mutagen: TXXX (ID3/MP3), Vorbis comments (FLAC/OGG/Opus), freeform atoms (MP4/M4A). These are the
+official extension mechanisms of each format -- not a hack -- and Navidrome reads them natively when
+configured via `Tags.*.Aliases` in its navidrome.toml.
 
 Frozen source => verdicts are cached forever per recording id (BEETSDIR/gbc-acousticbrainz-cache.json):
 a recording present in AB is fetched once; one confirmed absent (404 / omitted) is never re-queried; a
 network hiccup is left uncached -> retried next run. Best-effort: never gates the pipeline, never moves
 or deletes a file.
 """
+import importlib.util
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from pathlib import Path
 
 from ..beets import run_beet
 from ..config import Config
@@ -33,6 +39,16 @@ from ..logs import get_logger
 API = "https://acousticbrainz.org/api/v1"
 BATCH = 25          # AB caps recording_ids at 25 per request
 TIMEOUT = 25
+
+# Fields that beets' mediafile does NOT know how to map to file tag frames -> stored as db-only flex
+# attrs by `beet modify`. We inject them into the files as standard custom-tag frames (TXXX / Vorbis
+# comments / MP4 freeform atoms) so Navidrome and other media servers can read them.
+FLEX_ATTRS = frozenset({
+    "danceable", "key_strength", "tonal",
+    "mood_acoustic", "mood_aggressive", "mood_electronic", "mood_happy",
+    "mood_party", "mood_relaxed", "mood_sad",
+    "moods_mirex", "voice_instrumental",
+})
 
 # Mapping from AB's nested JSON to beets field names. The field NAMES are the canonical ones from beets'
 # (deprecated) beetsplug/acousticbrainz.py (so the ecosystem's queries still apply), but this is a
@@ -126,6 +142,49 @@ def _assign(field: str, value) -> str:
     return f"{field}={value}"
 
 
+def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
+    """Inject flex attrs as custom tags into one audio file via mutagen.
+
+    ID3  -> TXXX frames (the official ID3v2 extension mechanism for user-defined text)
+    Vorbis -> key=value comments (arbitrary keys allowed by spec)
+    MP4  -> ----:com.apple.itunes:<key> freeform atoms
+
+    Best-effort: any failure is logged and swallowed (never blocks the pipeline)."""
+    ext = path.rsplit(".", 1)[-1].lower()
+    try:
+        if ext in ("flac", "ogg", "opus"):
+            from mutagen.flac import FLAC
+            from mutagen.oggvorbis import OggVorbis
+            audio = FLAC(path) if ext == "flac" else OggVorbis(path)
+            for k, v in flex_attrs.items():
+                audio[k] = str(v)
+            audio.save()
+        elif ext == "mp3":
+            from mutagen.id3 import ID3, TXXX, ID3NoHeaderError
+            try:
+                audio = ID3(path)
+            except ID3NoHeaderError:
+                audio = ID3()
+            for k, v in flex_attrs.items():
+                desc = k
+                audio.delall(f"TXXX:{desc}")
+                audio.add(TXXX(encoding=3, desc=desc, text=str(v)))
+            audio.save(path)
+        elif ext in ("m4a", "aac", "mp4"):
+            from mutagen.mp4 import MP4
+            audio = MP4(path)
+            for k, v in flex_attrs.items():
+                audio[f"----:com.apple.itunes:{k}"] = [str(v).encode("utf-8")]
+            audio.save()
+        else:
+            log.debug("acousticbrainz: unsupported format for tag injection: %s", path)
+            return False
+        return True
+    except Exception as exc:
+        log.warning("acousticbrainz: tag injection failed %s: %s", path, exc)
+        return False
+
+
 def run(cfg: Config, scope: str = "") -> int:
     """Enrich tracks added in `scope` (whole library if empty) with AcousticBrainz data. Returns the
     number of recordings enriched."""
@@ -162,6 +221,7 @@ def run(cfg: Config, scope: str = "") -> int:
     # so a newly-added item that shares a recording id with an already-cached one still gets enriched. The
     # incremental watermark keeps `*sc` narrow on normal runs; `--all` deliberately re-applies the whole lib.
     enriched = absent = 0
+    modified = {}
     for m in mbids:
         fields = cache.get(m)
         if not fields:                         # None (absent) or still-pending this run
@@ -170,7 +230,28 @@ def run(cfg: Config, scope: str = "") -> int:
         assigns = [_assign(k, v) for k, v in sorted(fields.items())]
         run_beet(cfg, ["modify", "-y", f"mb_trackid:{m}", *sc, *assigns],
                  passname="acousticbrainz", echo_lines=False)
+        modified[m] = fields
         enriched += 1
+
+    # Write flex attrs to file tags via mutagen (beets' mediafile only writes native fields).
+    # Uses the official custom-tag mechanism of each format: TXXX (ID3), Vorbis comments, MP4 freeform.
+    if modified and importlib.util.find_spec("mutagen") is not None:
+        query = ",".join(f"mb_trackid:{m}" for m in modified)
+        _, paths_text = run_beet(
+            cfg, ["ls", "-f", "$mb_trackid\t$path", query, *sc],
+            passname="acousticbrainz", echo_lines=False)
+        tagged = 0
+        for line in paths_text.splitlines():
+            if "\t" not in line:
+                continue
+            mbid, path = line.split("\t", 1)
+            path = path.strip().encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+            flex = {k: v for k, v in modified.get(mbid, {}).items() if k in FLEX_ATTRS}
+            if flex and Path(path).is_file() and _write_file_tags(path, flex, log):
+                tagged += 1
+        log.info("acousticbrainz: %d file(s) tagged with flex attrs", tagged)
+    elif modified and importlib.util.find_spec("mutagen") is None:
+        log.warning("acousticbrainz: mutagen not installed -> flex attrs stay db-only (invisible to players)")
 
     log.info("=== acousticbrainz: %d recording(s) enriched, %d not in AB, %d pending (retry next run) ===",
              enriched, absent, pending)
