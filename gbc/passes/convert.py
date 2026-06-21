@@ -17,7 +17,7 @@ from ..util import backup_db, count_items
 # quarantine sub = the REASON ("converted"); beets lays the originals out by album under it
 # (-> quarantine/converted/<Albumartist>/<Album (Year)>/...), consistent with the other quarantine reasons.
 JOBS = [
-    ("WMA", "AAC/m4a (~256k)", "aac", ["format::Windows"], "converted"),
+    ("WMA", "Opus (open, adaptive bitrate)", "opus", ["format::Windows"], "converted"),
     ("WAV/AIFF", "FLAC (lossless)", "flac", [r"path::(?i)\.(wav|aiff?)$"], "converted"),
 ]
 

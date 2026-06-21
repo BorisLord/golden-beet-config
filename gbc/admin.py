@@ -33,6 +33,7 @@ def init(cfg: Config, cron: bool = False) -> int:
 
     for y in sorted((REPO_ROOT / "beets").glob("*.yaml")):
         text = y.read_text(encoding="utf-8")
+        text = text.replace("@HELPERS@", str(REPO_ROOT / "helpers"))   # convert.yaml -> the wma2opus wrapper
         if y.name == "config.yaml":
             text = re.sub(r"(?m)^directory:.*$", f"directory: {cfg.clean}", text)
             text = re.sub(r"(?m)^  log:.*$", f"  log: {cfg.log_dir}/import-decisions.log", text)

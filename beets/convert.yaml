@@ -1,15 +1,16 @@
-# convert.yaml -- optional format normalisation overlay, driven by `gbc convert`.
-#   WMA (lossy, proprietary/legacy ASF: poor players, weak tags, scrub mime=None crash) -> AAC/m4a ~256k
+# convert.yaml -- format normalisation overlay (runs in the pipeline + via `gbc convert`).
+#   WMA (lossy, proprietary/legacy ASF: poor players, weak tags, scrub mime=None crash) -> Opus (open)
 #   WAV + AIFF (uncompressed PCM, ~no tags, huge)                                        -> FLAC (lossless)
-# Lossless source -> FLAC = ZERO quality loss + tags + ~half the size. Lossy WMA -> AAC = one generational
-# loss accepted for compat. Originals are MOVED to a quarantine subdir (keep_new) -- NEVER deleted. Operates
-# on the CLEAN lib only; the NAS source is read-only and untouched.
+# Lossless source -> FLAC = ZERO quality loss + tags + ~half the size. Lossy WMA -> Opus = open + best
+# quality/bitrate; the helper sets the Opus bitrate FROM the source bitrate (adaptive, [48,256] kbps) so a
+# bad source stays low-bitrate (still flagged by qa's <192k check, never masked) and a good one isn't
+# downscaled. Originals are MOVED to a quarantine subdir (keep_new) -- NEVER deleted. CLEAN lib only.
 plugins: convert
 convert:
   formats:
-    aac:
-      command: ffmpeg -i $source -y -vn -acodec aac -b:a 256k $dest
-      extension: m4a
+    opus:
+      command: sh @HELPERS@/wma2opus.sh $source $dest    # @HELPERS@ filled by `gbc init` (-> <repo>/helpers)
+      extension: opus
     flac:
       command: ffmpeg -i $source -y -vn -acodec flac $dest
       extension: flac
