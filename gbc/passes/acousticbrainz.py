@@ -26,6 +26,7 @@ or deletes a file.
 """
 import importlib.util
 import json
+import typing
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -151,11 +152,18 @@ def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
 
     Best-effort: any failure is logged and swallowed (never blocks the pipeline)."""
     ext = path.rsplit(".", 1)[-1].lower()
+    audio: typing.Any = None        # holds a different mutagen type per format branch (FLAC/OggOpus/ID3/MP4)
     try:
         if ext in ("flac", "ogg", "opus"):
-            from mutagen.flac import FLAC
-            from mutagen.oggvorbis import OggVorbis
-            audio = FLAC(path) if ext == "flac" else OggVorbis(path)
+            if ext == "flac":
+                from mutagen.flac import FLAC
+                audio = FLAC(path)
+            elif ext == "opus":
+                from mutagen.oggopus import OggOpus  # Opus != Vorbis: OggVorbis rejects an OpusHead stream
+                audio = OggOpus(path)
+            else:
+                from mutagen.oggvorbis import OggVorbis
+                audio = OggVorbis(path)
             for k, v in flex_attrs.items():
                 audio[k] = str(v)
             audio.save()
@@ -236,17 +244,21 @@ def run(cfg: Config, scope: str = "") -> int:
     # Write flex attrs to file tags via mutagen (beets' mediafile only writes native fields).
     # Uses the official custom-tag mechanism of each format: TXXX (ID3), Vorbis comments, MP4 freeform.
     if modified and importlib.util.find_spec("mutagen") is not None:
-        query = ",".join(f"mb_trackid:{m}" for m in modified)
+        # Reuse the SAME scoped query (not a `mb_trackid:<id>,...` OR of every modified id -- thousands of
+        # them on a full run exceed MAX_ARG_STRLEN (128 KB) for a single argv entry -> execve E2BIG), then
+        # filter the rows to the recordings we just enriched.
         _, paths_text = run_beet(
-            cfg, ["ls", "-f", "$mb_trackid\t$path", query, *sc],
+            cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
             passname="acousticbrainz", echo_lines=False)
         tagged = 0
         for line in paths_text.splitlines():
             if "\t" not in line:
                 continue
             mbid, path = line.split("\t", 1)
+            if mbid not in modified:
+                continue
             path = path.strip().encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
-            flex = {k: v for k, v in modified.get(mbid, {}).items() if k in FLEX_ATTRS}
+            flex = {k: v for k, v in modified[mbid].items() if k in FLEX_ATTRS}
             if flex and Path(path).is_file() and _write_file_tags(path, flex, log):
                 tagged += 1
         log.info("acousticbrainz: %d file(s) tagged with flex attrs", tagged)

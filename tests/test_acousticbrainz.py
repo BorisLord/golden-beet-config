@@ -108,14 +108,15 @@ class TestRun(Base):
         n, _ = self._run([], lambda batch: {})
         self.assertEqual(n, 0)
 
-    def test_flex_tag_ls_query_uses_comma_separated_mbids(self):
-        """After modify, run() issues a batch `ls -f $mb_trackid\\t$path` with comma-joined mbids."""
+    def test_flex_tag_ls_query_is_scoped_not_per_id_or(self):
+        """run() lists paths for tagging via the SAME scoped `mb_trackid::.` query, not a
+        `mb_trackid:<id>,...` OR of every modified id (which overflows MAX_ARG_STRLEN on a full run)."""
         path_map = {"mbA": "/nonexistent/path.flac"}
         _, calls = self._run(["mbA"], lambda batch: {"mbA": DOC}, path_map=path_map)
-        flex_ls = [c for c in calls if c and c[0] == "ls" and any("\\t" in str(a) or "\t" in str(a) for a in c)]
+        flex_ls = [c for c in calls if c and c[0] == "ls" and any("$path" in str(a) for a in c)]
         self.assertEqual(len(flex_ls), 1)
-        query_arg = next(a for a in flex_ls[0] if "mb_trackid:" in str(a))
-        self.assertIn("mb_trackid:mbA", query_arg)
+        self.assertIn("mb_trackid::.", flex_ls[0])                               # scoped query reused
+        self.assertFalse(any("mb_trackid:mbA" in str(a) for a in flex_ls[0]))    # NOT a per-id OR
 
     def test_mutagen_absent_does_not_crash(self):
         """When mutagen is not installed, run() still succeeds (flex attrs stay db-only)."""
@@ -149,6 +150,10 @@ class TestWriteFileTags(Base):
             subprocess.run([_FFMPEG, "-y", "-f", "lavfi", "-i",
                             "anullsrc=r=44100:cl=mono", "-t", "0.1", "-c:a", "aac", p],
                            capture_output=True, check=True)
+        elif fmt == "opus":
+            subprocess.run([_FFMPEG, "-y", "-f", "lavfi", "-i",
+                            "anullsrc=r=44100:cl=mono", "-t", "0.1", "-c:a", "libopus", p],
+                           capture_output=True, check=True)
         return p
 
     def _log(self):
@@ -180,6 +185,15 @@ class TestWriteFileTags(Base):
         self.assertEqual(tags["----:com.apple.itunes:mood_relaxed"], [b"0.95"])
         self.assertEqual(tags["----:com.apple.itunes:danceable"], [b"0.42"])
         self.assertEqual(tags["----:com.apple.itunes:voice_instrumental"], [b"vocal"])
+
+    def test_opus_vorbis_comments(self):
+        p = self._make("opus")
+        self.assertTrue(ab._write_file_tags(p, self._FLEX, self._log()))
+        from mutagen.oggopus import OggOpus
+        tags = OggOpus(p)
+        self.assertEqual(tags["mood_relaxed"], ["0.95"])
+        self.assertEqual(tags["danceable"], ["0.42"])
+        self.assertEqual(tags["voice_instrumental"], ["vocal"])
 
     def test_unsupported_format_returns_false(self):
         p = str(self.tmp / "test.wav")
