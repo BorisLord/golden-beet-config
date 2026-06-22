@@ -10,12 +10,13 @@ from tests.base import Base
 class TestVerify(Base):
     def _items(self, specs):
         """specs: [(stem, mbid)] -> create the files (so stat() works) + return the fake `beet ls` text
-        (6 fields: $id $path $mb_trackid $albumartist $album $year)."""
+        (8 fields: $id $path $mb_trackid $albumartist $album $year $artist $title)."""
         lines = []
         for i, (stem, mbid) in enumerate(specs, 1):
             (self.tmp / f"{stem}.m4a").write_bytes(b"x")
             p = self.tmp / f"{stem}.m4a"
-            lines.append(f"{i}{verify.SEP}{p}{verify.SEP}{mbid}{verify.SEP}TestArtist{verify.SEP}TestAlbum{verify.SEP}2001")
+            lines.append(f"{i}{verify.SEP}{p}{verify.SEP}{mbid}{verify.SEP}TestArtist{verify.SEP}TestAlbum"
+                         f"{verify.SEP}2001{verify.SEP}TestArtist{verify.SEP}TestTitle")
         return "\n".join(lines)
 
     def test_quarantines_only_conclusive_imposters(self):
@@ -88,18 +89,39 @@ class TestVerify(Base):
         self.assertEqual((status, present, mismatch), ("ok", False, None))
 
     def test_mismatch_logged_but_track_kept(self):
-        """detect+log philosophy: a mismatch with the tagged stub unknown stays 'rare' (KEPT), never quarantined."""
+        """detect+log: a DIFFERENT-artist mismatch (tag stub unknown) is LOGGED but stays 'rare' (KEPT)."""
         text = self._items([("a", "mbA")])
         fv = {"a": ("ok", False, ("Barcode Brothers", "These Boots (radio edit)", 0.93))}
         with mock.patch.object(verify, "_acoustid_available", lambda: True), \
              mock.patch.object(verify, "run_beet", lambda *a, **k: (0, text)), \
              mock.patch.object(verify, "_file_verdict", lambda p, m: fv[Path(p).stem]), \
-             mock.patch.object(verify, "_official_known", lambda m: False):
+             mock.patch.object(verify, "_official_known", lambda m: False), \
+             self.assertLogs("gbc", "WARNING") as cm:
             n = verify.run(self.cfg)
         self.assertEqual(n, 0)                                   # nothing quarantined
         self.assertTrue((self.tmp / "a.m4a").exists())           # KEPT in clean
+        self.assertTrue(any("MISMATCH" in m and "Barcode Brothers" in m for m in cm.output))
         verd = json.loads((self.cfg.beetsdir / "gbc-verify-verdicts.json").read_text())
         self.assertEqual(verd[str(self.tmp / "a.m4a")], "rare")  # genuine-kept despite the wrong tag
+
+    def test_same_artist_other_recording_not_flagged(self):
+        """Cypress Hill case: audio matches the SAME artist (other recording id) -> NOT flagged (no noise)."""
+        text = self._items([("a", "mbA")])
+        fv = {"a": ("ok", False, ("TestArtist", "Other Title", 0.99))}   # same artist as the tag
+        with mock.patch.object(verify, "_acoustid_available", lambda: True), \
+             mock.patch.object(verify, "run_beet", lambda *a, **k: (0, text)), \
+             mock.patch.object(verify, "_file_verdict", lambda p, m: fv[Path(p).stem]), \
+             mock.patch.object(verify, "_official_known", lambda m: False), \
+             self.assertNoLogs("gbc", "WARNING"):
+            n = verify.run(self.cfg)
+        self.assertEqual(n, 0)
+        self.assertTrue((self.tmp / "a.m4a").exists())
+
+    def test_same_artist_helper(self):
+        self.assertTrue(verify._same_artist("Cypress Hill", "Cypress Hill"))
+        self.assertTrue(verify._same_artist("Cypress Hill", "Cypress Hill feat. Sen Dog"))
+        self.assertFalse(verify._same_artist("Radio Rental", "Barcode Brothers"))
+        self.assertFalse(verify._same_artist("", "X"))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ and dropped from the lib, so the clean library stays clean. Verdicts are cached 
 import importlib.util
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -31,6 +32,14 @@ SEP = "\x1f"        # US control char: can't appear in tags/paths and survives s
 
 def _acoustid_available() -> bool:
     return importlib.util.find_spec("acoustid") is not None
+
+
+def _same_artist(a: str, b: str) -> bool:
+    """True if two artist strings share a primary artist (one normalises into the other). So the SAME song
+    on another release (same artist, different mb_trackid) or a 'feat.' variant is NOT flagged as a wrong
+    tag -- only a genuinely DIFFERENT artist is (e.g. a cover matched to the wrong performer)."""
+    na, nb = re.sub(r"\W+", "", a.lower()), re.sub(r"\W+", "", b.lower())
+    return bool(na) and bool(nb) and (na in nb or nb in na)
 
 
 def _file_verdict(path, mbid):
@@ -107,9 +116,9 @@ def run(cfg: Config, scope="") -> int:
         log.warning("pyacoustid not available -> fingerprint verification skipped")
         return 0
     sc = [scope] if scope else []
-    fmt = f"$id{SEP}$path{SEP}$mb_trackid{SEP}$albumartist{SEP}$album{SEP}$year"
+    fmt = f"$id{SEP}$path{SEP}$mb_trackid{SEP}$albumartist{SEP}$album{SEP}$year{SEP}$artist{SEP}$title"
     _, text = run_beet(cfg, ["ls", "-f", fmt, "mb_trackid::.", *sc], passname="verify", echo_lines=False)
-    rows = [ln.split(SEP, 5) for ln in text.splitlines() if ln.count(SEP) >= 5]
+    rows = [ln.split(SEP, 7) for ln in text.splitlines() if ln.count(SEP) >= 7]
 
     cpath = cfg.beetsdir / "gbc-verify-cache.json"
     try:
@@ -120,7 +129,7 @@ def run(cfg: Config, scope="") -> int:
     moved, checked, incon, backed = [], 0, 0, False
     mismatches = 0
     verdicts: dict[str, str] = {}
-    for itemid, path, mbid, albumartist, album, year in rows:
+    for itemid, path, mbid, albumartist, album, year, artist, title in rows:
         try:
             st = Path(path).stat()
         except OSError:
@@ -132,11 +141,11 @@ def run(cfg: Config, scope="") -> int:
             if status != "ok":
                 incon += 1
                 continue                                       # inconclusive -> not cached, retried next run
-            if mismatch:                                       # audio is confidently a DIFFERENT recording -> tag wrong
+            # flag only a genuinely DIFFERENT artist; a same-artist other-recording-id is the same song -> skip
+            if mismatch and not _same_artist(mismatch[0], artist):
                 mismatches += 1
-                y = f" ({year[:4]})" if year and year[:4] not in ("", "0", "None") else ""
-                log.warning("MISMATCH: %s - %s%s | audio = %s - %s (%.2f) -- kept, tag likely wrong",
-                            albumartist, album, y, mismatch[0], mismatch[1], mismatch[2])
+                log.warning("MISMATCH: %s - %s | audio = %s - %s (%.2f) -- kept, tag likely wrong",
+                            artist, title, mismatch[0], mismatch[1], mismatch[2])
             if present:
                 verdict = "ok"
             else:
