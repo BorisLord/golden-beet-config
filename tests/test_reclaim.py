@@ -25,19 +25,22 @@ class TestReclaim(Base):
         return d
 
     def _build_db(self, albums):
-        """albums: {clean_subdir: [(filename, length)]} -> create library.db, return {path: ...} for verdicts."""
+        """albums: {clean_subdir: [(filename, length)]} -> create library.db (with ids, like beets);
+        return {(subdir, filename): id_str} so verdicts can be keyed by item id (as verify now writes them)."""
         self.cfg.beetsdir.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(self.cfg.library)
-        con.execute("CREATE TABLE items (path TEXT, length REAL, albumartist TEXT, album TEXT, year INTEGER)")
-        paths = []
+        con.execute("CREATE TABLE items "
+                    "(id INTEGER PRIMARY KEY, path TEXT, length REAL, albumartist TEXT, album TEXT, year INTEGER)")
+        ids, next_id = {}, 0
         for sub, items in albums.items():
             for fn, length in items:
+                next_id += 1
                 p = str(self.cfg.clean / sub / fn)
-                con.execute("INSERT INTO items VALUES (?,?,?,?,?)", (p, float(length), "Tigran", sub, 2015))
-                paths.append((sub, p))
+                con.execute("INSERT INTO items VALUES (?,?,?,?,?,?)", (next_id, p, float(length), "Tigran", sub, 2015))
+                ids[(sub, fn)] = str(next_id)
         con.commit()
         con.close()
-        return paths
+        return ids
 
     def _write_verdicts(self, mapping):
         (self.cfg.beetsdir / "gbc-verify-verdicts.json").write_text(json.dumps(mapping), encoding="utf-8")
@@ -47,7 +50,7 @@ class TestReclaim(Base):
         rare = self._src_album("AlbumRare", ["04", "05"])              # 40,50 -> one rare -> keep
         part = self._src_album("AlbumPartial", ["06", "07", "08"])     # 60,70,80, but clean has 2 -> keep
         ambig = self._src_album("AlbumAmbig", ["09"])                  # 90 -> matches two clean albums -> keep
-        self._build_db({
+        ids = self._build_db({
             "Good": [("01.flac", 10), ("02.flac", 20), ("03.flac", 30)],
             "Rare": [("04.flac", 40), ("05.flac", 50)],
             "Partial": [("06.flac", 60), ("07.flac", 70)],            # only 2 of 3 imported
@@ -55,15 +58,15 @@ class TestReclaim(Base):
             "AmbigY": [("y.flac", 90)],
         })
         self._write_verdicts({
-            str(self.cfg.clean / "Good" / "01.flac"): "ok",
-            str(self.cfg.clean / "Good" / "02.flac"): "ok",
-            str(self.cfg.clean / "Good" / "03.flac"): "ok",
-            str(self.cfg.clean / "Rare" / "04.flac"): "ok",
-            str(self.cfg.clean / "Rare" / "05.flac"): "rare",
-            str(self.cfg.clean / "Partial" / "06.flac"): "ok",
-            str(self.cfg.clean / "Partial" / "07.flac"): "ok",
-            str(self.cfg.clean / "AmbigX" / "x.flac"): "ok",
-            str(self.cfg.clean / "AmbigY" / "y.flac"): "ok",
+            ids[("Good", "01.flac")]: "ok",
+            ids[("Good", "02.flac")]: "ok",
+            ids[("Good", "03.flac")]: "ok",
+            ids[("Rare", "04.flac")]: "ok",
+            ids[("Rare", "05.flac")]: "rare",
+            ids[("Partial", "06.flac")]: "ok",
+            ids[("Partial", "07.flac")]: "ok",
+            ids[("AmbigX", "x.flac")]: "ok",
+            ids[("AmbigY", "y.flac")]: "ok",
         })
         return good, rare, part, ambig
 
@@ -91,8 +94,8 @@ class TestReclaim(Base):
         # two identical-duration source folders but ONE clean copy -> can't tell which was copied -> keep both
         d1 = self._src_album("DupA", ["01", "02"])      # durs 10,20
         d2 = self._src_album("DupB", ["01", "02"])      # same multiset
-        self._build_db({"Clean": [("01.flac", 10), ("02.flac", 20)]})
-        self._write_verdicts({str(self.cfg.clean / "Clean" / fn): "ok" for fn in ("01.flac", "02.flac")})
+        ids = self._build_db({"Clean": [("01.flac", 10), ("02.flac", 20)]})
+        self._write_verdicts({ids[("Clean", fn)]: "ok" for fn in ("01.flac", "02.flac")})
         with mock.patch.object(reclaim.beetscfg, "read_import", lambda c: BeetsImport(copy=True)), \
              mock.patch.object(sidecars, "dur", _fake_dur):
             moved = reclaim.run(self.cfg)
@@ -103,8 +106,8 @@ class TestReclaim(Base):
         # a folder with an unprobeable file -> shrunk multiset must NOT be matched against a smaller clean album
         alb = self._src_album("Partial", ["01", "02"])  # durs 10,20
         (alb / "bad.flac").write_text("x")              # _fake_dur -> 0 (probe failure); folder now has 3 files
-        self._build_db({"Clean": [("01.flac", 10), ("02.flac", 20)]})  # would match the SHRUNK [10,20] sans guard
-        self._write_verdicts({str(self.cfg.clean / "Clean" / fn): "ok" for fn in ("01.flac", "02.flac")})
+        ids = self._build_db({"Clean": [("01.flac", 10), ("02.flac", 20)]})  # would match SHRUNK [10,20] sans guard
+        self._write_verdicts({ids[("Clean", fn)]: "ok" for fn in ("01.flac", "02.flac")})
         with mock.patch.object(reclaim.beetscfg, "read_import", lambda c: BeetsImport(copy=True)), \
              mock.patch.object(sidecars, "dur", _fake_dur):
             moved = reclaim.run(self.cfg)

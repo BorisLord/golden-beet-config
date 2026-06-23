@@ -36,10 +36,10 @@ class TestVerify(Base):
         for stem in ("a", "c", "d"):
             self.assertTrue((self.tmp / f"{stem}.m4a").exists())  # genuine / inconclusive kept
         verd = json.loads((self.cfg.beetsdir / "gbc-verify-verdicts.json").read_text())
-        self.assertEqual(verd[str(self.tmp / "a.m4a")], "ok")     # reclaim input: genuine
-        self.assertEqual(verd[str(self.tmp / "b.m4a")], "imposter")
-        self.assertEqual(verd[str(self.tmp / "d.m4a")], "rare")
-        self.assertNotIn(str(self.tmp / "c.m4a"), verd)           # inconclusive -> no verdict recorded
+        self.assertEqual(verd["1"], "ok")                         # reclaim input keyed by item id (a=1..d=4)
+        self.assertEqual(verd["2"], "imposter")
+        self.assertEqual(verd["4"], "rare")
+        self.assertNotIn("3", verd)                               # inconclusive -> no verdict recorded
 
     def test_skips_cleanly_without_pyacoustid(self):
         with mock.patch.object(verify, "_acoustid_available", lambda: False):
@@ -102,7 +102,7 @@ class TestVerify(Base):
         self.assertTrue((self.tmp / "a.m4a").exists())           # KEPT in clean
         self.assertTrue(any("MISMATCH" in m and "Barcode Brothers" in m for m in cm.output))
         verd = json.loads((self.cfg.beetsdir / "gbc-verify-verdicts.json").read_text())
-        self.assertEqual(verd[str(self.tmp / "a.m4a")], "rare")  # genuine-kept despite the wrong tag
+        self.assertEqual(verd["1"], "rare")                      # id-keyed; genuine-kept despite the wrong tag
 
     def test_same_artist_other_recording_not_flagged(self):
         """Cypress Hill case: audio matches the SAME artist (other recording id) -> NOT flagged (no noise)."""

@@ -87,9 +87,10 @@ def _file_verdict(path, mbid):
 def _official_known(mbid):
     """True if the MusicBrainz recording is registered in AcoustID (>=1 fingerprint); None if inconclusive."""
     url = f"https://api.acoustid.org/v2/track/list_by_mbid?format=json&client={APIKEY}&mbid={mbid}"
+    req = urllib.request.Request(url, headers={"User-Agent": "gbc/0.7 (golden-beets-config)"})
     for attempt in range(RETRIES):
         try:
-            with urllib.request.urlopen(url, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=15) as r:
                 data = json.loads(r.read())
         except (urllib.error.URLError, ValueError, TimeoutError, OSError):
             time.sleep(2 ** attempt)
@@ -102,8 +103,9 @@ def _official_known(mbid):
 
 
 def _write_verdicts(cfg: Config, verdicts: dict) -> None:
-    """Persist per-clean-path verdicts for the reclaim pass. Rewritten EACH run (empty until proven), so a
-    crash or a skipped verify leaves reclaim nothing stale to trust."""
+    """Persist per-ITEM-ID verdicts for the reclaim pass (id, not path: representation-independent, so reclaim
+    can't miss a match on a path-rendering difference). Rewritten EACH run (empty until proven), so a crash or
+    a skipped verify leaves reclaim nothing stale to trust."""
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     (cfg.beetsdir / "gbc-verify-verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
 
@@ -156,7 +158,7 @@ def run(cfg: Config, scope="") -> int:
                 verdict = "imposter" if known else "rare"      # rare = file & official both unknown -> genuine, kept
             cache[key] = verdict
             checked += 1
-        verdicts[path] = verdict                               # conclusive verdict (ok/rare/imposter) -> reclaim input
+        verdicts[itemid] = verdict                             # conclusive verdict keyed by item id -> reclaim input
         if verdict == "imposter":                              # conclusive imposter -> quarantine (never deleted)
             if not backed:
                 backup_db(cfg, "verify", log)

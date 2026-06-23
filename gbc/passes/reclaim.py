@@ -52,17 +52,18 @@ def _dec(v):
 
 
 def _clean_albums(db: str, clean_root: str) -> dict[str, dict]:
-    """beets items grouped by clean album dir -> {durs, paths, meta=(albumartist, album, year)}."""
+    """beets items grouped by clean album dir -> {durs, ids, meta=(albumartist, album, year)}. Verdicts are
+    keyed by item id (not path), so reclaim matches verify regardless of path-rendering differences."""
     with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
-        rows = con.execute("SELECT path, length, albumartist, album, year FROM items").fetchall()
-    out: dict[str, dict] = defaultdict(lambda: {"durs": [], "paths": [], "meta": ("", "", "")})
-    for (path, length, albumartist, album, year) in rows:
+        rows = con.execute("SELECT id, path, length, albumartist, album, year FROM items").fetchall()
+    out: dict[str, dict] = defaultdict(lambda: {"durs": [], "ids": [], "meta": ("", "", "")})
+    for (itemid, path, length, albumartist, album, year) in rows:
         pp = Path(_dec(path))
         if not pp.is_absolute():                       # beets >=2.10 stores paths relative to the lib root
             pp = Path(clean_root) / pp
         d = out[str(pp.parent)]
         d["durs"].append(round(length or 0))
-        d["paths"].append(str(pp))
+        d["ids"].append(str(itemid))
         a, al, y = d["meta"]                            # fill each field from the first NON-EMPTY track value
         d["meta"] = (a or _dec(albumartist), al or _dec(album), y or _dec(year))
     for v in out.values():
@@ -99,7 +100,7 @@ def run(cfg: Config, log=None) -> int:
         if str(Path(sdir).resolve()) == src_root:      # never move the source root itself
             continue
         cdirs = [cdir for cdir, c in clean_albums.items()
-                 if len(c["paths"]) == len(sdurs) and matches(c["durs"], sdurs)]
+                 if len(c["ids"]) == len(sdurs) and matches(c["durs"], sdurs)]
         if len(cdirs) == 1:
             src_match[sdir] = cdirs[0]
             clean_hits[cdirs[0]] += 1
@@ -113,11 +114,11 @@ def run(cfg: Config, log=None) -> int:
             kept += 1
             ambig += 1
             continue
-        if not all(p in verdicts for p in c["paths"]):  # no verdict this run (out of verify scope) -> revisit --all
+        if not all(i in verdicts for i in c["ids"]):   # no verdict this run (out of verify scope) -> revisit --all
             kept += 1
             unverified += 1
             continue
-        if not all(verdicts.get(p) == "ok" for p in c["paths"]):
+        if not all(verdicts.get(i) == "ok" for i in c["ids"]):
             kept += 1                                  # a track is imposter / rare / inconclusive -> keep source
             continue
         qd = quarantine_dir(cfg.dump, "reclaimed", *c["meta"], fallback=Path(sdir).name)
@@ -129,7 +130,7 @@ def run(cfg: Config, log=None) -> int:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if safe_move(sdir, dest, log):
             moved += 1
-            log.info("RECLAIM verified album: %s -> %s/ (%d track(s) all ok)", Path(sdir).name, dest, len(c["paths"]))
+            log.info("RECLAIM verified album: %s -> %s/ (%d track(s) all ok)", Path(sdir).name, dest, len(c["ids"]))
     log.info("=== reclaim: %d album(s) -> %s; %d kept (%d ambiguous, %d unverified-this-run; --all to revisit) ===",
              moved, cfg.dump, kept, ambig, unverified)
     return moved
