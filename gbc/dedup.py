@@ -17,6 +17,7 @@ from .sidecars import AUDIO, quarantine_dir, safe_move
 # Two files compared here are the SAME track measured by the SAME ffprobe -> real duplicates are
 # near-identical in length, so the tolerance is tight (unlike sidecars' ±6s ffprobe-vs-beets comparison).
 TOL = 3   # seconds
+LOSSLESS = {".flac", ".wav", ".aif", ".aiff", ".alac", ".ape", ".wv", ".tta", ".dsf"}
 
 
 def _log(log):
@@ -70,7 +71,9 @@ def dedup(src, dump, do_apply, log=None):
             durs = [d for _, d, _, _ in items if d > 0]
             if len(durs) != len(items) or max(durs) - min(durs) > TOL:
                 continue        # a probe failed (unverifiable) OR genuinely different lengths -> keep all (safe)
-            items.sort(key=lambda x: (x[2], x[3]), reverse=True)   # best bitrate, then largest file
+            # lossless beats lossy FIRST (a FLAC whose ffprobe format bitrate reads 0 must not lose to a 320k
+            # MP3), then best bitrate, then largest file
+            items.sort(key=lambda x: (Path(x[0]).suffix.lower() in LOSSLESS, x[2], x[3]), reverse=True)
             keep = Path(items[0][0]).name
             for p, _, _, _ in items[1:]:
                 qd = quarantine_dir(dump, "duplicates", *_album_tags(p), fallback=Path(folder).name)

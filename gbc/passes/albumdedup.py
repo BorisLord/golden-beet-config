@@ -140,7 +140,9 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
                 qd.mkdir(parents=True, exist_ok=True)
             if not do_apply or safe_move(folder, dest, log):
                 if do_apply:
-                    run_beet(cfg, ["remove", "-a", "-f", f"id:{aid}"], passname="albumdedup", echo_lines=False)
+                    rc, _ = run_beet(cfg, ["remove", "-a", "-f", f"id:{aid}"], passname="albumdedup", echo_lines=False)
+                    if rc:
+                        log.warning("albumdedup: `beet remove` rc=%d for id:%s -- stale lib entry may remain", rc, aid)
                 moved += 1
                 log.info("%s dup album: %s - %s -> %s/ (kept '%s')",
                          "DEDUP" if do_apply else "DRY ", a["artist"], a["album"], dest, albums[keeper]["album"])

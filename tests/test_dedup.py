@@ -51,6 +51,16 @@ class TestDedup(Base):
         self.assertEqual(moved, 0)                                       # can't confirm -> keep both (safe)
         self.assertTrue(a.exists() and b.exists())
 
+    def test_lossless_kept_over_lossy_when_bitrate_unknown(self):
+        # a FLAC whose ffprobe format bitrate reads 0 vs a 320k MP3 of the SAME track -> keep the lossless one
+        a, b = self._album("01 - Song.flac", "01 - Song.mp3")
+        meta = {str(a): ("song", 100, 0), str(b): ("song", 100, 320000)}
+        with mock.patch.object(dedup, "_probe", lambda p: meta[str(p)]):
+            moved = dedup.dedup(str(self.tmp / "src"), str(self.tmp / "dump"), True)
+        self.assertEqual(moved, 1)
+        self.assertTrue(a.exists())                  # lossless FLAC kept despite bitrate reading 0
+        self.assertFalse(b.exists())                 # lossy MP3 quarantined
+
     def test_dry_run_counts_but_moves_nothing(self):
         a, b = self._album("a.mp3", "b.mp3")
         meta = {str(a): ("t", 100, 320000), str(b): ("t", 100, 128000)}
