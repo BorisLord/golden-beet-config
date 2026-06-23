@@ -54,5 +54,5 @@ def run(cfg: Config, src=None, reimport=False) -> int:
     art_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     covers = sum(1 for p in cfg.clean.rglob("cover.*") if p.suffix.lower() in art_exts) if cfg.clean.exists() else 0
     log.info("items: %d | albums: %d | covers: %d",
-             count_items(cfg, ["ls"]), count_items(cfg, ["ls", "-a"]), covers)
+             count_items(cfg, ["ls"], "import"), count_items(cfg, ["ls", "-a"], "import"), covers)
     return rc

@@ -9,4 +9,11 @@ br=$(ffprobe -v error -show_entries format=bit_rate -of csv=p=0 "$src" 2>/dev/nu
 k=$(( ${br:-128000} / 1000 ))
 [ "$k" -lt 48 ] && k=48
 [ "$k" -gt 256 ] && k=256
-exec ffmpeg -v error -i "$src" -y -vn -c:a libopus -b:a "${k}k" "$dst"
+ffmpeg -v error -i "$src" -y -vn -c:a libopus -b:a "${k}k" "$dst" || exit 1
+# Validate the Opus actually decodes BEFORE returning 0: beets' keep_new moves the WMA original to quarantine
+# only when this command SUCCEEDS, so a non-zero exit here keeps the original safely in place (never lose the
+# only good copy to a silently-broken encode). -xerror makes a bad stream fail the decode.
+if [ ! -s "$dst" ] || ! ffmpeg -v error -xerror -i "$dst" -f null - >/dev/null 2>&1; then
+    rm -f "$dst"
+    exit 1
+fi

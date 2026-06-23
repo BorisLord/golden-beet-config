@@ -26,7 +26,7 @@ def run(cfg: Config) -> int:
     log = get_logger("convert")
     pending = [(lbl, tgt, fmt, q, sub, n)
                for (lbl, tgt, fmt, q, sub) in JOBS
-               if (n := count_items(cfg, ["ls", *q]))]
+               if (n := count_items(cfg, ["ls", *q], "convert"))]
     if not pending:
         log.info("no WMA/WAV/AIFF in the library -> nothing to convert")
         return 0
@@ -40,6 +40,6 @@ def run(cfg: Config) -> int:
         if rc:
             log.error("beet convert (%s) failed (rc=%d) -- originals untouched", lbl, rc)
             return rc
-        left = count_items(cfg, ["ls", *q])
+        left = count_items(cfg, ["ls", *q], "convert")
         log.info("done: %d %s converted, %d remain; originals quarantined in %s", n - left, lbl, left, dest)
     return 0
