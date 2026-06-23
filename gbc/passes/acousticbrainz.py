@@ -26,6 +26,10 @@ or deletes a file.
 """
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 import typing
 import urllib.error
 import urllib.parse
@@ -40,10 +44,11 @@ from ..logs import get_logger
 API = "https://acousticbrainz.org/api/v1"
 BATCH = 25          # AB caps recording_ids at 25 per request
 TIMEOUT = 25
+_UA = "gbc/0.7 (golden-beets-config)"   # default Python-urllib UA can be 403'd/throttled by the public API
 
 # Fields that beets' mediafile does NOT know how to map to file tag frames -> stored as db-only flex
-# attrs by `beet modify`. We inject them into the files as standard custom-tag frames (TXXX / Vorbis
-# comments / MP4 freeform atoms) so Navidrome and other media servers can read them.
+# attrs (by the in-process bulk apply, _ab_bulk.py). We inject them into the files as standard custom-tag
+# frames (TXXX / Vorbis comments / MP4 freeform atoms) so Navidrome and other media servers can read them.
 FLEX_ATTRS = frozenset({
     "danceable", "key_strength", "tonal",
     "mood_acoustic", "mood_aggressive", "mood_electronic", "mood_happy",
@@ -116,17 +121,22 @@ def _fields_for(doc: dict) -> dict:
 
 
 def _fetch(mbids: list[str]):
-    """{mbid: merged_doc} for the mbids AB knows (others omitted); None on any network/parse failure
-    (-> caller leaves them uncached and retries next run)."""
+    """{mbid: merged_doc} for the mbids AB knows (others omitted). None ONLY on a TRANSIENT failure
+    (timeout / network / 5xx / 429) so the caller retries next run; a 4xx (malformed/absent id) returns the
+    partial result instead, so those ids get cached `None` rather than poisoning the batch on every run."""
     merged: dict = {}
     ids = ";".join(urllib.parse.quote(m, safe="") for m in mbids)   # encode each id; ';' stays the AB separator
     for level in ("low-level", "high-level"):
-        url = f"{API}/{level}?recording_ids={ids}"
+        req = urllib.request.Request(f"{API}/{level}?recording_ids={ids}", headers={"User-Agent": _UA})
         try:
-            with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 data = json.load(r)
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                continue                       # 4xx = a malformed/absent id in the batch -> no data this level,
+            return None                        # but NOT transient: skip so absent ids cache `None`, not retry forever
         except (urllib.error.URLError, ValueError, TimeoutError, OSError):
-            return None
+            return None                        # timeout / network / 5xx / 429 -> transient, retry next run
         for mbid, subs in data.items():
             doc = subs.get("0") if isinstance(subs, dict) else None
             if doc:
@@ -134,13 +144,56 @@ def _fetch(mbids: list[str]):
     return merged
 
 
-def _assign(field: str, value) -> str:
-    """`field=value` token for `beet modify` (bpm -> int media field; probabilities -> 6dp like the plugin)."""
+def _value(field: str, value):
+    """Native value for one field (bpm -> rounded int media field; the rest stay float/str as fetched).
+    A non-numeric bpm (malformed AB doc) falls back to the raw value -- it must never abort the whole batch."""
     if field == "bpm":
-        return f"bpm={round(float(value))}"
-    if isinstance(value, float):
-        return f"{field}={value:.6f}"
-    return f"{field}={value}"
+        try:
+            return round(float(value))
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _beets_python(beet: str) -> str:
+    """Path to the BEETS venv's python (it can `import beets`; gbc's own venv cannot). Read the shebang of
+    the `beet` entry point, then try a sibling python3, then fall back to a bare 'python3'."""
+    try:
+        path = beet if Path(beet).exists() else (shutil.which(beet) or beet)
+        real = Path(path).resolve()
+        shebang = real.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        if shebang.startswith("#!"):
+            py = shebang[2:].strip().split()[0]
+            if Path(py).is_file():
+                return py
+        sibling = real.parent / "python3"
+        if sibling.is_file():
+            return str(sibling)
+    except (OSError, IndexError):
+        pass
+    return "python3"
+
+
+def _bulk_apply(cfg: Config, modified: dict, log) -> None:
+    """Apply every {mbid: fields} to the library in ONE beets process via _ab_bulk.py -- replaces one
+    `beet modify` per recording (~N `beet` startups, the pass's real cost). Best-effort: a failure is
+    logged, never raised (the enrichment is already cached and retried next run)."""
+    payload = {m: {k: _value(k, v) for k, v in f.items()} for m, f in modified.items()}
+    cfg.beetsdir.mkdir(parents=True, exist_ok=True)
+    # per-run temp payload (NOT a fixed filename): two concurrent runs must not clobber each other's JSON
+    fd, tmp = tempfile.mkstemp(dir=cfg.beetsdir, prefix="gbc-ab-modify-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        out = subprocess.run(
+            [_beets_python(cfg.beet), str(Path(__file__).with_name("_ab_bulk.py")), str(cfg.library), tmp],
+            capture_output=True, text=True)
+        if out.returncode:
+            log.error("acousticbrainz: bulk modify failed (rc=%d): %s", out.returncode, out.stderr.strip()[:300])
+        else:
+            log.info("acousticbrainz: %s item(s) written in one pass", out.stdout.strip() or "?")
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
@@ -235,11 +288,10 @@ def run(cfg: Config, scope: str = "") -> int:
         if not fields:                         # None (absent) or still-pending this run
             absent += m in cache
             continue
-        assigns = [_assign(k, v) for k, v in sorted(fields.items())]
-        run_beet(cfg, ["modify", "-y", f"mb_trackid:{m}", *sc, *assigns],
-                 passname="acousticbrainz", echo_lines=False)
         modified[m] = fields
         enriched += 1
+    if modified:                               # ONE beets process for the whole batch (not `beet modify` per id)
+        _bulk_apply(cfg, modified, log)
 
     # Write flex attrs to file tags via mutagen (beets' mediafile only writes native fields).
     # Uses the official custom-tag mechanism of each format: TXXX (ID3), Vorbis comments, MP4 freeform.

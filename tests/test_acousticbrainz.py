@@ -1,8 +1,11 @@
+import importlib.util
 import json
 import shutil
 import subprocess
+import sys
 import typing
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from gbc.passes import acousticbrainz as ab
@@ -40,21 +43,47 @@ class TestMapping(unittest.TestCase):
         doc = {"tonal": {"key_key": "C", "key_scale": "minor"}}
         self.assertEqual(ab._fields_for(doc)["initial_key"], "Cm")
 
-    def test_assign_formats_bpm_and_floats(self):
-        self.assertEqual(ab._assign("bpm", 83.735), "bpm=84")            # rounded int media field
-        self.assertEqual(ab._assign("danceable", 0.8763), "danceable=0.876300")
-        self.assertEqual(ab._assign("initial_key", "F# major"), "initial_key=F# major")
+    def test_value_rounds_bpm_keeps_others(self):
+        self.assertEqual(ab._value("bpm", 83.735), 84)                   # rounded int media field
+        self.assertEqual(ab._value("danceable", 0.8763), 0.8763)        # float kept as-is
+        self.assertEqual(ab._value("initial_key", "F#m"), "F#m")        # str kept as-is
+
+    def test_value_bad_bpm_falls_back(self):
+        self.assertEqual(ab._value("bpm", "not-a-number"), "not-a-number")  # must not raise / abort the batch
+        self.assertIsNone(ab._value("bpm", None))
+
+
+class TestFetch(unittest.TestCase):
+    def _raise(self, code):
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, "x", {}, None)
+        return boom
+
+    def test_http_4xx_returns_partial_not_none(self):
+        # a malformed/absent id (4xx) must NOT poison the batch forever -> partial result, caller caches absent
+        with mock.patch.object(ab.urllib.request, "urlopen", self._raise(400)):
+            self.assertEqual(ab._fetch(["badid"]), {})
+
+    def test_http_5xx_returns_none_for_retry(self):
+        with mock.patch.object(ab.urllib.request, "urlopen", self._raise(503)):
+            self.assertIsNone(ab._fetch(["x"]))             # transient -> None -> retried next run
 
 
 class TestRun(Base):
     def _run(self, mbids, fetch, path_map=None):
-        """Drive run() with a fake `beet` (ls -> mbids, modify -> recorded) and a stubbed _fetch.
+        """Drive run() with a fake `beet` (ls -> mbids) and a stubbed _fetch, capturing the batch handed to
+        _bulk_apply (the in-process replacement for the per-recording `beet modify`).
+
+        Returns (n, calls, applied): n = recordings enriched, calls = every fake run_beet argv, applied =
+        the {mbid: fields} dict _bulk_apply would have written.
 
         path_map: optional {mbid: filepath} for the flex-tag injection `ls -f $mb_trackid\\t$path` query.
-        When provided, the second ls call returns tab-separated mbid+path lines; otherwise it returns
-        bare mbids (the old behaviour, which still passes because os.path.isfile rejects non-existent paths).
+        When provided, the second ls call returns tab-separated mbid+path lines; otherwise bare mbids.
         """
         calls = []
+        applied: dict = {}
 
         def fake_run_beet(cfg, args, **k):
             calls.append(args)
@@ -67,27 +96,29 @@ class TestRun(Base):
                 return 0, "\n".join(mbids)
             return 0, ""
 
+        def fake_bulk(cfg, modified, log):
+            applied.update(modified)
+
         with mock.patch.object(ab, "run_beet", fake_run_beet), \
-             mock.patch.object(ab, "_fetch", fetch):
+             mock.patch.object(ab, "_fetch", fetch), \
+             mock.patch.object(ab, "_bulk_apply", fake_bulk):
             n = ab.run(self.cfg)
-        return n, calls
+        return n, calls, applied
 
     def test_enriches_present_and_caches(self):
-        n, calls = self._run(["mbA", "mbB"], lambda batch: {"mbA": DOC})  # only mbA known to AB
+        n, _, applied = self._run(["mbA", "mbB"], lambda batch: {"mbA": DOC})  # only mbA known to AB
         self.assertEqual(n, 1)
-        modifies = [c for c in calls if c and c[0] == "modify"]
-        self.assertEqual(len(modifies), 1)
-        self.assertEqual(modifies[0][:3], ["modify", "-y", "mb_trackid:mbA"])
-        self.assertIn("bpm=84", modifies[0])
-        self.assertIn("initial_key=F#", modifies[0])
+        self.assertEqual(list(applied), ["mbA"])          # exactly the one enriched recording
+        self.assertEqual(applied["mbA"]["bpm"], 83.735)   # raw value (rounding happens inside _bulk_apply)
+        self.assertEqual(applied["mbA"]["initial_key"], "F#")
         cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text())
         self.assertIsNone(cache["mbB"])                   # confirmed absent -> cached as None
         self.assertEqual(cache["mbA"]["voice_instrumental"], "instrumental")
 
     def test_network_failure_not_cached(self):
-        n, calls = self._run(["mbA"], lambda batch: None)  # AB unreachable -> pending, not cached
+        n, _, applied = self._run(["mbA"], lambda batch: None)  # AB unreachable -> pending, not cached
         self.assertEqual(n, 0)
-        self.assertFalse([c for c in calls if c and c[0] == "modify"])
+        self.assertFalse(applied)                          # nothing handed to the bulk writer
         cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text() or "{}") \
             if (self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").exists() else {}
         self.assertNotIn("mbA", cache)                    # left uncached -> retried next run
@@ -100,19 +131,20 @@ class TestRun(Base):
         def boom(batch):
             raise AssertionError("should not fetch a cached mbid")
 
-        n, calls = self._run(["mbA"], boom)
+        n, _, applied = self._run(["mbA"], boom)
         self.assertEqual(n, 1)
-        self.assertIn("bpm=90", next(c for c in calls if c and c[0] == "modify"))
+        self.assertEqual(applied["mbA"]["bpm"], 90)
 
     def test_no_mbids_in_scope(self):
-        n, _ = self._run([], lambda batch: {})
+        n, _, applied = self._run([], lambda batch: {})
         self.assertEqual(n, 0)
+        self.assertFalse(applied)
 
     def test_flex_tag_ls_query_is_scoped_not_per_id_or(self):
         """run() lists paths for tagging via the SAME scoped `mb_trackid::.` query, not a
         `mb_trackid:<id>,...` OR of every modified id (which overflows MAX_ARG_STRLEN on a full run)."""
         path_map = {"mbA": "/nonexistent/path.flac"}
-        _, calls = self._run(["mbA"], lambda batch: {"mbA": DOC}, path_map=path_map)
+        _, calls, _ = self._run(["mbA"], lambda batch: {"mbA": DOC}, path_map=path_map)
         flex_ls = [c for c in calls if c and c[0] == "ls" and any("$path" in str(a) for a in c)]
         self.assertEqual(len(flex_ls), 1)
         self.assertIn("mb_trackid::.", flex_ls[0])                               # scoped query reused
@@ -121,9 +153,9 @@ class TestRun(Base):
     def test_mutagen_absent_does_not_crash(self):
         """When mutagen is not installed, run() still succeeds (flex attrs stay db-only)."""
         with mock.patch("importlib.util.find_spec", return_value=None):
-            n, calls = self._run(["mbA"], lambda batch: {"mbA": DOC})
+            n, _, applied = self._run(["mbA"], lambda batch: {"mbA": DOC})
         self.assertEqual(n, 1)
-        self.assertTrue(any(c and c[0] == "modify" for c in calls))
+        self.assertIn("mbA", applied)
 
 
 _FFMPEG = shutil.which("ffmpeg")
@@ -212,6 +244,60 @@ class TestWriteFileTags(Base):
         txxx_frames = [k for k in tags if k.startswith("TXXX:mood_relaxed")]
         self.assertEqual(len(txxx_frames), 1)
         self.assertEqual(str(tags["TXXX:mood_relaxed"]), "0.9")
+
+
+class TestBeetsPython(Base):
+    """_beets_python resolves the BEETS venv's python from the `beet` entry point's shebang."""
+
+    def test_reads_shebang(self):
+        py = self.tmp / "py3"
+        py.write_text("#!/bin/sh\n")
+        beet = self.tmp / "beet"
+        beet.write_text(f"#!{py}\nprint('hi')\n")
+        self.assertEqual(ab._beets_python(str(beet)), str(py))
+
+    def test_falls_back_when_unreadable(self):
+        self.assertEqual(ab._beets_python("/no/such/beet-xyz"), "python3")
+
+
+def _beets_importable() -> bool:
+    # NB: gate on the `beets.library` submodule, not `beets` -- the repo's own `beets/` config dir makes
+    # find_spec("beets") resolve to a (library-less) namespace package whenever cwd is the repo root.
+    try:
+        return importlib.util.find_spec("beets.library") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+@unittest.skipUnless(_beets_importable(), "beets not importable in this venv")
+class TestBulkApply(Base):
+    """Integration test for _ab_bulk.py: applies fields to real beets items in ONE process (the in-process
+    replacement for ~N `beet modify`). Skipped unless beets is importable (run via
+    `uv run --with beets python -m unittest`)."""
+
+    def test_applies_fields_to_every_item_of_a_recording(self):
+        from beets.library import Item, Library
+        db = str(self.cfg.library)
+        self.cfg.beetsdir.mkdir(parents=True, exist_ok=True)
+        lib = Library(db)
+        for rec, title in [("rec-1", "A"), ("rec-1", "A (live)"), ("rec-2", "B")]:   # rec-1 on two albums
+            it = Item(mb_trackid=rec, title=title)
+            it.path = f"/tmp/gbc-nonexistent-{title}.mp3".encode()                    # no real file: try_write no-ops
+            lib.add(it)
+        del lib
+
+        jp = self.cfg.beetsdir / "fields.json"
+        jp.write_text(json.dumps({"rec-1": {"bpm": 84, "mood_happy": 0.05, "initial_key": "F#"}}))
+        script = Path(ab.__file__).with_name("_ab_bulk.py")
+        out = subprocess.run([sys.executable, str(script), db, str(jp)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "2")                  # both rec-1 items, not rec-2
+
+        items = {(i.mb_trackid, i.title): i for i in Library(db).items()}
+        self.assertEqual(items[("rec-1", "A")].bpm, 84)            # native int field
+        self.assertEqual(str(items[("rec-1", "A")].initial_key), "F#")             # MusicalKey keeps the sharp
+        self.assertEqual(float(items[("rec-1", "A (live)")]["mood_happy"]), 0.05)  # flex attr on the 2nd item
+        self.assertEqual(items[("rec-2", "B")].bpm, 0)            # untouched (no fields for rec-2)
 
 
 if __name__ == "__main__":
