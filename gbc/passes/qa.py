@@ -56,7 +56,7 @@ def _container_mismatch(path):
     ogg = head[:4] == b"OggS"
     sig = {  # ext -> True when the leading bytes match what the extension claims
         ".mp3": head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0),
-        ".flac": head[:4] == b"fLaC",
+        ".flac": head[:4] == b"fLaC" or head[:3] == b"ID3",   # some rippers prepend an ID3v2 tag to a valid FLAC
         ".ogg": ogg, ".oga": ogg, ".opus": ogg,
         ".m4a": head[4:8] == b"ftyp", ".m4b": head[4:8] == b"ftyp",
     }
@@ -82,7 +82,9 @@ def _cull(cfg: Config, paths, log) -> int:
             dest = qd / f"{fp.stem} ({i}){fp.suffix}"
         qd.mkdir(parents=True, exist_ok=True)
         if safe_move(p, dest, log):
-            run_beet(cfg, ["remove", "-f", f"path:{p}"], passname="qa", echo_lines=False)
+            rc, _ = run_beet(cfg, ["remove", "-f", f"path:{p}"], passname="qa", echo_lines=False)
+            if rc:
+                log.warning("qa: `beet remove` rc=%d for %s -- stale lib entry may remain", rc, p)
             moved += 1
             log.info("CULL corrupt: %s -> %s/", fp.name, qd)
     log.info("  [CORRUPT] %d corrupt file(s) culled to %s/corrupt -- recoverable, never deleted", moved, cfg.dump)
@@ -144,12 +146,15 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
         for p in paths:
             if Path(p).suffix.lower() in (".mp3", ".flac"):
                 continue
-            res = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", p, "-f", "null", "-"],
+            # -xerror aborts + exits nonzero on the first decode error (catches mid-file corruption too); gate
+            # on the RETURN CODE, not stderr -- valid-but-exotic files (ape/wv/dsf) emit harmless error-level
+            # noise that must NOT get a real file culled to quarantine.
+            res = subprocess.run(["ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", p, "-f", "null", "-"],
                                  capture_output=True, text=True)
-            if res.stderr.strip():
+            if res.returncode != 0:
                 other_bad += 1
                 corrupt.append(p)
-                log.info("  BAD: %s", p)
+                log.info("  BAD (rc=%d): %s", res.returncode, p)
     log.info("=== 6b. other-format decode: %d bad ===", other_bad)
 
     # 6c. container vs extension mismatch (magic bytes) -- a RIFF/WAVE file named .mp3 reads in mediafile

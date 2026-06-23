@@ -26,8 +26,9 @@ class TestContainerMismatch(Base):
         self.assertEqual(_container_mismatch(self._w("d.ogg", b"OggS\x00\x02\x00\x00\x00\x00\x00\x00")), "")
         self.assertEqual(_container_mismatch(self._w("e.m4a", b"\x00\x00\x00\x20ftypM4A ")), "")
 
-    def test_flac_with_id3_magic_flagged(self):
-        self.assertIn("not a flac", _container_mismatch(self._w("f.flac", b"ID3\x04\x00\x00\x00\x00\x00\x00\x00")))
+    def test_flac_with_id3_tag_accepted(self):
+        # a FLAC carrying a leading ID3v2 tag (some rippers add one) is VALID and playable -> must NOT be culled
+        self.assertEqual(_container_mismatch(self._w("f.flac", b"ID3\x04\x00\x00\x00\x00\x00\x00\x00")), "")
 
     def test_empty_file_flagged(self):
         self.assertEqual(_container_mismatch(self._w("g.mp3", b"")), "empty file")
