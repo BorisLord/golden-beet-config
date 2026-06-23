@@ -33,8 +33,10 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False) ->
     except Exception:                        # lesser copy. FIRST: needs only import metadata, and the later
         log.exception("album dedup pass errored (non-fatal)")   # passes then never waste work on a dropped dup
     try:
-        convert.run(cfg)                     # normalise WMA->Opus, WAV/AIFF->FLAC BEFORE verify so every later
-    except Exception:                        # pass runs identically on the converted files; best-effort
+        rc_conv = convert.run(cfg)           # normalise WMA->Opus, WAV/AIFF->FLAC BEFORE verify so every later
+        if rc_conv:                          # pass runs identically on the converted files; best-effort
+            log.warning("convert returned rc=%d -- some originals were NOT converted (left intact in clean)", rc_conv)
+    except Exception:
         log.exception("convert pass errored (non-fatal)")
     wm_new = datetime.now().replace(microsecond=0).isoformat()   # after import: this run's items are < wm_new
 
@@ -46,7 +48,10 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False) ->
         acousticbrainz.run(cfg, scope=scope)  # network-only acoustic metadata (BPM/key/moods); best-effort
     except Exception:                        # AB downtime must never break the import pipeline
         log.exception("acousticbrainz pass errored (non-fatal)")
-    qa.run(cfg, scope=scope, cull=True)      # audit + cull corrupt files -> quarantine/corrupt (never gates)
+    try:
+        qa.run(cfg, scope=scope, cull=True)  # audit + cull corrupt files -> quarantine/corrupt (never gates)
+    except Exception:                        # a qa hiccup must never block the watermark advance below
+        log.exception("qa pass errored (non-fatal)")
     try:
         reclaim.run(cfg)                     # preserve-mode only: verified source albums -> quarantine
     except Exception:                        # reclaim must never break the import pipeline

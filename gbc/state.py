@@ -24,7 +24,9 @@ def get_watermark(cfg: Config) -> str | None:
 def set_watermark(cfg: Config, iso_ts: str) -> None:
     p = _path(cfg)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"last_run": iso_ts}), encoding="utf-8")
+    tmp = p.with_name(p.name + ".tmp")                 # write+rename: a kill mid-write can't truncate the state
+    tmp.write_text(json.dumps({"last_run": iso_ts}), encoding="utf-8")
+    tmp.replace(p)
 
 
 def added_query(watermark: str | None) -> str:

@@ -29,6 +29,17 @@ class TestInboxGate(Base):
              mock.patch.object(inbox, "_dir_size", lambda s: next(grow)):
             inbox._debounce(self.cfg, interval=0, max_wait=1800)   # must RETURN, not loop forever
 
+    def test_debounce_runs_before_the_new_gate(self):
+        """The drop must settle BEFORE the --pretend plan is judged: a still-copying tree would otherwise read
+        as 'nothing new' and the whole tick would be skipped."""
+        (self.cfg.src / "Some Folder").mkdir(parents=True)
+        (self.cfg.src / "Some Folder" / "a.flac").write_text("x")
+        order = []
+        with mock.patch.object(inbox, "_debounce", lambda cfg, **k: order.append("debounce")), \
+             mock.patch.object(inbox, "run_beet", lambda cfg, args, **k: (order.append("pretend"), (0, ""))[1]):
+            inbox.run(self.cfg)                       # empty plan -> exits after debounce + pretend
+        self.assertEqual(order, ["debounce", "pretend"])
+
     def test_inbox_bows_out_when_locked(self):
         (self.cfg.src / "f").mkdir(parents=True)
         self.cfg.beet = self.fake_beet(stderr="Album: /x\n")

@@ -46,10 +46,11 @@ def run(cfg: Config) -> int:
         if not cfg.src.exists() or not any(cfg.src.iterdir()):
             log.info("source empty -> exit")
             return 0
+        _debounce(cfg)                       # settle the drop BEFORE judging it: a still-copying tree can read as
+                                             # "nothing new" on a partial --pretend view and skip this whole tick
         _, plan = run_beet(cfg, ["import", "-q", "-i", "--pretend", str(cfg.src)],
                            passname="inbox", echo_lines=False)
         if not has_new(plan):
             log.info("nothing new to import -> exit")
             return 0
-        _debounce(cfg)
         return pipeline.run(cfg)
