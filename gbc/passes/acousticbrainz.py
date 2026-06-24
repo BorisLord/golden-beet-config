@@ -7,6 +7,7 @@ vanish). Best-effort: never gates the pipeline, never moves/deletes a file.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,9 @@ from ..logs import get_logger
 API = "https://acousticbrainz.org/api/v1"
 BATCH = 25          # AB caps recording_ids at 25 per request
 TIMEOUT = 25
+# AB is keyed by the MusicBrainz recording UUID. A non-UUID id (e.g. a Discogs '14266022-1') makes AB 400 the
+# WHOLE batch ("not a valid UUID"), so every co-batched UUID would cache None -> drop these before batching.
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _UA = "gbc/0.7 (golden-beets-config)"   # default Python-urllib UA can be 403'd/throttled by the public API
 
 # No mediafile tag-frame mapping -> stored as db-only flex attrs, then injected into files as custom-tag
@@ -221,7 +225,7 @@ def run(cfg: Config, scope: str = "") -> int:
     sc = [scope] if scope else []
     _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid", "mb_trackid::.", *sc],
                        passname="acousticbrainz", echo_lines=False)
-    mbids = sorted({ln.strip() for ln in text.splitlines() if ln.strip()})
+    mbids = sorted({ln.strip() for ln in text.splitlines() if ln.strip() and _UUID_RE.match(ln.strip())})
     if not mbids:
         log.info("=== acousticbrainz: no MB-matched tracks in scope ===")
         return 0

@@ -11,6 +11,10 @@ from unittest import mock
 from gbc.passes import acousticbrainz as ab
 from tests.base import Base
 
+# AB is keyed by MB recording UUIDs; run() now filters out anything that isn't UUID-shaped.
+MB_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+MB_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
 # A merged low+high-level AB document (the shape ABSCHEME maps against). Includes fields we deliberately
 # DROP (gender, average_loudness) to prove the curated scheme ignores them.
 DOC = {
@@ -106,56 +110,71 @@ class TestRun(Base):
         return n, calls, applied
 
     def test_enriches_present_and_caches(self):
-        n, _, applied = self._run(["mbA", "mbB"], lambda batch: {"mbA": DOC})  # only mbA known to AB
+        n, _, applied = self._run([MB_A, MB_B], lambda batch: {MB_A: DOC})  # only mbA known to AB
         self.assertEqual(n, 1)
-        self.assertEqual(list(applied), ["mbA"])          # exactly the one enriched recording
-        self.assertEqual(applied["mbA"]["bpm"], 83.735)   # raw value (rounding happens inside _bulk_apply)
-        self.assertEqual(applied["mbA"]["initial_key"], "F#")
+        self.assertEqual(list(applied), [MB_A])          # exactly the one enriched recording
+        self.assertEqual(applied[MB_A]["bpm"], 83.735)   # raw value (rounding happens inside _bulk_apply)
+        self.assertEqual(applied[MB_A]["initial_key"], "F#")
         cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text())
-        self.assertIsNone(cache["mbB"])                   # confirmed absent -> cached as None
-        self.assertEqual(cache["mbA"]["voice_instrumental"], "instrumental")
+        self.assertIsNone(cache[MB_B])                   # confirmed absent -> cached as None
+        self.assertEqual(cache[MB_A]["voice_instrumental"], "instrumental")
 
     def test_network_failure_not_cached(self):
-        n, _, applied = self._run(["mbA"], lambda batch: None)  # AB unreachable -> pending, not cached
+        n, _, applied = self._run([MB_A], lambda batch: None)  # AB unreachable -> pending, not cached
         self.assertEqual(n, 0)
         self.assertFalse(applied)                          # nothing handed to the bulk writer
         cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text() or "{}") \
             if (self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").exists() else {}
-        self.assertNotIn("mbA", cache)                    # left uncached -> retried next run
+        self.assertNotIn(MB_A, cache)                    # left uncached -> retried next run
 
     def test_uses_cache_without_refetch(self):
         (self.cfg.beetsdir).mkdir(parents=True, exist_ok=True)
         (self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").write_text(
-            json.dumps({"mbA": {"bpm": 90, "gender": "male"}}))
+            json.dumps({MB_A: {"bpm": 90, "gender": "male"}}))
 
         def boom(batch):
             raise AssertionError("should not fetch a cached mbid")
 
-        n, _, applied = self._run(["mbA"], boom)
+        n, _, applied = self._run([MB_A], boom)
         self.assertEqual(n, 1)
-        self.assertEqual(applied["mbA"]["bpm"], 90)
+        self.assertEqual(applied[MB_A]["bpm"], 90)
 
     def test_no_mbids_in_scope(self):
         n, _, applied = self._run([], lambda batch: {})
         self.assertEqual(n, 0)
         self.assertFalse(applied)
 
+    def test_non_uuid_ids_dropped_before_batching(self):
+        """A Discogs id ('14266022-1') makes AB 400 the WHOLE batch -> it must be dropped before batching so
+        it never poisons its co-batched UUIDs (which would then cache as absent)."""
+        seen = []
+
+        def fetch(batch):
+            seen.extend(batch)
+            return {MB_A: DOC}
+
+        _, _, applied = self._run([MB_A, "14266022-1"], fetch)
+        self.assertEqual(seen, [MB_A])                    # Discogs id never handed to AB
+        self.assertEqual(list(applied), [MB_A])
+        cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text())
+        self.assertNotIn("14266022-1", cache)             # not even cached as absent
+
     def test_flex_tag_ls_query_is_scoped_not_per_id_or(self):
         """run() lists paths for tagging via the SAME scoped `mb_trackid::.` query, not a
         `mb_trackid:<id>,...` OR of every modified id (which overflows MAX_ARG_STRLEN on a full run)."""
-        path_map = {"mbA": "/nonexistent/path.flac"}
-        _, calls, _ = self._run(["mbA"], lambda batch: {"mbA": DOC}, path_map=path_map)
+        path_map = {MB_A: "/nonexistent/path.flac"}
+        _, calls, _ = self._run([MB_A], lambda batch: {MB_A: DOC}, path_map=path_map)
         flex_ls = [c for c in calls if c and c[0] == "ls" and any("$path" in str(a) for a in c)]
         self.assertEqual(len(flex_ls), 1)
         self.assertIn("mb_trackid::.", flex_ls[0])                               # scoped query reused
-        self.assertFalse(any("mb_trackid:mbA" in str(a) for a in flex_ls[0]))    # NOT a per-id OR
+        self.assertFalse(any(f"mb_trackid:{MB_A}" in str(a) for a in flex_ls[0]))    # NOT a per-id OR
 
     def test_mutagen_absent_does_not_crash(self):
         """When mutagen is not installed, run() still succeeds (flex attrs stay db-only)."""
         with mock.patch("importlib.util.find_spec", return_value=None):
-            n, _, applied = self._run(["mbA"], lambda batch: {"mbA": DOC})
+            n, _, applied = self._run([MB_A], lambda batch: {MB_A: DOC})
         self.assertEqual(n, 1)
-        self.assertIn("mbA", applied)
+        self.assertIn(MB_A, applied)
 
 
 _FFMPEG = shutil.which("ffmpeg")
