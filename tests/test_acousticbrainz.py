@@ -1,11 +1,8 @@
-import importlib.util
 import json
 import shutil
 import subprocess
-import sys
 import typing
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from gbc.passes import acousticbrainz as ab
@@ -77,39 +74,38 @@ class TestFetch(unittest.TestCase):
 
 class TestRun(Base):
     def _run(self, mbids, fetch, path_map=None):
-        """Drive run() with a fake `beet` (ls -> mbids) and a stubbed _fetch, capturing the batch handed to
-        _bulk_apply (the in-process replacement for the per-recording `beet modify`).
+        """Drive run() with a fake `beet` (ls -> mbids) and a stubbed _fetch, reconstructing what was applied
+        from the native `beet modify mb_trackid:<id> field=value ...` calls.
 
         Returns (n, calls, applied): n = recordings enriched, calls = every fake run_beet argv, applied =
-        the {mbid: fields} dict _bulk_apply would have written.
+        {mbid: {field: value_str}} parsed from the modify calls (values are the strings beet modify received).
 
         path_map: optional {mbid: filepath} for the flex-tag injection `ls -f $mb_trackid\\t$path` query.
-        When provided, the second ls call returns tab-separated mbid+path lines; otherwise bare mbids.
         """
         calls = []
-        applied: dict = {}
 
         def fake_run_beet(cfg, args, **k):
             calls.append(args)
-            if args and args[0] == "ls":
-                # run() lists "$mb_trackid\t$path" in ONE scoped query; default a path if the test gave none
+            if args and args[0] == "ls":                  # run() lists "$mb_trackid\t$path" in one scoped query
                 return 0, "\n".join(f"{m}\t{(path_map or {}).get(m, '/x/' + m + '.flac')}" for m in mbids)
-            return 0, ""
-
-        def fake_bulk(cfg, modified, log):
-            applied.update(modified)
+            return 0, ""                                  # modify / write
 
         with mock.patch.object(ab, "run_beet", fake_run_beet), \
-             mock.patch.object(ab, "_fetch", fetch), \
-             mock.patch.object(ab, "_bulk_apply", fake_bulk):
+             mock.patch.object(ab, "_fetch", fetch):
             n = ab.run(self.cfg)
+
+        applied: dict = {}
+        for c in calls:
+            if c and c[0] == "modify":
+                mbid = next(a.split(":", 1)[1] for a in c if a.startswith("mb_trackid:"))
+                applied[mbid] = dict(a.split("=", 1) for a in c if "=" in a)
         return n, calls, applied
 
     def test_enriches_present_and_caches(self):
         n, _, applied = self._run([MB_A, MB_B], lambda batch: {MB_A: DOC})  # only mbA known to AB
         self.assertEqual(n, 1)
         self.assertEqual(list(applied), [MB_A])          # exactly the one enriched recording
-        self.assertEqual(applied[MB_A]["bpm"], 83.735)   # raw value (rounding happens inside _bulk_apply)
+        self.assertEqual(applied[MB_A]["bpm"], "84")     # beet modify receives the rounded int (as a string)
         self.assertEqual(applied[MB_A]["initial_key"], "F#")
         cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text())
         self.assertIsNone(cache[MB_B])                   # confirmed absent -> cached as None
@@ -133,7 +129,7 @@ class TestRun(Base):
 
         n, _, applied = self._run([MB_A], boom)
         self.assertEqual(n, 1)
-        self.assertEqual(applied[MB_A]["bpm"], 90)
+        self.assertEqual(applied[MB_A]["bpm"], "90")
 
     def test_no_mbids_in_scope(self):
         n, _, applied = self._run([], lambda batch: {})
@@ -274,58 +270,38 @@ class TestWriteFileTags(Base):
         self.assertEqual(str(tags["TXXX:mood_relaxed"]), "0.9")
 
 
-class TestBeetsPython(Base):
-    """_beets_python resolves the BEETS venv's python from the `beet` entry point's shebang."""
+class TestApply(Base):
+    """_apply emits one native `beet modify mb_trackid:<id> field=value ...` per recording (DB + file write +
+    failure logging are beets' own); bad-bpm fields are dropped, empty recordings skipped."""
 
-    def test_reads_shebang(self):
-        py = self.tmp / "py3"
-        py.write_text("#!/bin/sh\n")
-        beet = self.tmp / "beet"
-        beet.write_text(f"#!{py}\nprint('hi')\n")
-        self.assertEqual(ab._beets_python(str(beet)), str(py))
+    def test_builds_modify_per_recording_with_rounded_bpm(self):
+        calls = []
+        with mock.patch.object(ab, "run_beet", lambda cfg, a, **k: calls.append(a) or (0, "")):
+            applied, failed = ab._apply(self.cfg, {MB_A: {"bpm": 83.735, "initial_key": "F#m",
+                                                          "mood_happy": 0.05}}, mock.MagicMock())
+        self.assertEqual((applied, failed), (1, 0))
+        cmd = next(c for c in calls if c and c[0] == "modify")
+        self.assertEqual(cmd[:4], ["modify", "-y", "-M", f"mb_trackid:{MB_A}"])   # nomove, scoped by recording
+        self.assertIn("bpm=84", cmd)                       # rounded int
+        self.assertIn("initial_key=F#m", cmd)              # minor key, sharp preserved
+        self.assertIn("mood_happy=0.05", cmd)
 
-    def test_falls_back_when_unreadable(self):
-        self.assertEqual(ab._beets_python("/no/such/beet-xyz"), "python3")
+    def test_drops_bad_bpm_and_counts_failures(self):
+        calls = []
+        with mock.patch.object(ab, "run_beet", lambda cfg, a, **k: calls.append(a) or (1, "")):  # modify "fails"
+            applied, failed = ab._apply(self.cfg, {MB_A: {"bpm": "nope", "initial_key": "C"}}, mock.MagicMock())
+        cmd = next(c for c in calls if c and c[0] == "modify")
+        self.assertNotIn("bpm=nope", cmd)                  # non-numeric bpm dropped, not passed to beets
+        self.assertNotIn("bpm=None", cmd)
+        self.assertIn("initial_key=C", cmd)                # the good field still applied
+        self.assertEqual((applied, failed), (0, 1))        # rc!=0 -> counted as failed
 
-
-def _beets_importable() -> bool:
-    # NB: gate on the `beets.library` submodule, not `beets` -- the repo's own `beets/` config dir makes
-    # find_spec("beets") resolve to a (library-less) namespace package whenever cwd is the repo root.
-    try:
-        return importlib.util.find_spec("beets.library") is not None
-    except (ImportError, AttributeError, ValueError):
-        return False
-
-
-@unittest.skipUnless(_beets_importable(), "beets not importable in this venv")
-class TestBulkApply(Base):
-    """Integration test for _ab_bulk.py: applies fields to real beets items in ONE process (the in-process
-    replacement for ~N `beet modify`). Skipped unless beets is importable (run via
-    `uv run --with beets python -m unittest`)."""
-
-    def test_applies_fields_to_every_item_of_a_recording(self):
-        from beets.library import Item, Library
-        db = str(self.cfg.library)
-        self.cfg.beetsdir.mkdir(parents=True, exist_ok=True)
-        lib = Library(db)
-        for rec, title in [("rec-1", "A"), ("rec-1", "A (live)"), ("rec-2", "B")]:   # rec-1 on two albums
-            it = Item(mb_trackid=rec, title=title)
-            it.path = f"/tmp/gbc-nonexistent-{title}.mp3".encode()                    # no real file: try_write no-ops
-            lib.add(it)
-        del lib
-
-        jp = self.cfg.beetsdir / "fields.json"
-        jp.write_text(json.dumps({"rec-1": {"bpm": 84, "mood_happy": 0.05, "initial_key": "F#"}}))
-        script = Path(ab.__file__).with_name("_ab_bulk.py")
-        out = subprocess.run([sys.executable, str(script), db, str(jp)], capture_output=True, text=True)
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(out.stdout.strip(), "2")                  # both rec-1 items, not rec-2
-
-        items = {(i.mb_trackid, i.title): i for i in Library(db).items()}
-        self.assertEqual(items[("rec-1", "A")].bpm, 84)            # native int field
-        self.assertEqual(str(items[("rec-1", "A")].initial_key), "F#")             # MusicalKey keeps the sharp
-        self.assertEqual(float(items[("rec-1", "A (live)")]["mood_happy"]), 0.05)  # flex attr on the 2nd item
-        self.assertEqual(items[("rec-2", "B")].bpm, 0)            # untouched (no fields for rec-2)
+    def test_recording_with_only_bad_bpm_is_skipped(self):
+        calls = []
+        with mock.patch.object(ab, "run_beet", lambda cfg, a, **k: calls.append(a) or (0, "")):
+            applied, failed = ab._apply(self.cfg, {MB_A: {"bpm": "nope"}}, mock.MagicMock())
+        self.assertEqual((applied, failed), (0, 0))
+        self.assertFalse(any(c and c[0] == "modify" for c in calls))   # no valid field -> no modify call
 
 
 if __name__ == "__main__":

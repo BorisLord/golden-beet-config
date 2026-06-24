@@ -6,11 +6,7 @@ vanish). Best-effort: never gates the pipeline, never moves/deletes a file.
 """
 import importlib.util
 import json
-import os
 import re
-import shutil
-import subprocess
-import tempfile
 import typing
 import urllib.error
 import urllib.parse
@@ -134,45 +130,24 @@ def _value(field: str, value):
     return value
 
 
-def _beets_python(beet: str) -> str:
-    """Path to the BEETS venv's python (can `import beets`; gbc's venv cannot). From the `beet` entry-point
-    shebang, then a sibling python3, then bare 'python3'."""
-    try:
-        path = beet if Path(beet).exists() else (shutil.which(beet) or beet)
-        real = Path(path).resolve()
-        shebang = real.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
-        if shebang.startswith("#!"):
-            py = shebang[2:].strip().split()[0]
-            if Path(py).is_file():
-                return py
-        sibling = real.parent / "python3"
-        if sibling.is_file():
-            return str(sibling)
-    except (OSError, IndexError):
-        pass
-    return "python3"
-
-
-def _bulk_apply(cfg: Config, modified: dict, log) -> None:
-    """Apply all {mbid: fields} in ONE beets process via _ab_bulk.py (vs one `beet modify` per recording --
-    ~N startups, the pass's real cost). Best-effort: failure logged, never raised (already cached)."""
-    payload = {m: {k: nv for k, v in f.items() if (nv := _value(k, v)) is not None}
-               for m, f in modified.items()}
-    cfg.beetsdir.mkdir(parents=True, exist_ok=True)
-    # per-run temp name: two concurrent runs must not clobber each other's payload
-    fd, tmp = tempfile.mkstemp(dir=cfg.beetsdir, prefix="gbc-ab-modify-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        out = subprocess.run(
-            [_beets_python(cfg.beet), str(Path(__file__).with_name("_ab_bulk.py")), str(cfg.library), tmp],
-            capture_output=True, text=True)
-        if out.returncode:
-            log.error("acousticbrainz: bulk modify failed (rc=%d): %s", out.returncode, out.stderr.strip()[:300])
+def _apply(cfg: Config, modified: dict, log) -> tuple[int, int]:
+    """Apply each recording the NATIVE way -- `beet modify -y -M mb_trackid:<uuid> field=value ...`. beets
+    writes the DB (native bpm/initial_key + flex attrs) AND the native tags to the file, logging any write
+    failure (no homemade try_write that drops a write silently). One modify per recording -- a recording can
+    sit on several albums, so the query updates all its items. Returns (applied, failed)."""
+    applied = failed = 0
+    for mbid, fields in modified.items():
+        assigns = [f"{k}={v}" for k, v in ((k, _value(k, v)) for k, v in fields.items()) if v is not None]
+        if not assigns:
+            continue
+        rc, _ = run_beet(cfg, ["modify", "-y", "-M", f"mb_trackid:{mbid}", *assigns],
+                         passname="acousticbrainz", echo_lines=False)
+        if rc:
+            log.warning("acousticbrainz: `beet modify` rc=%d for mb_trackid:%s", rc, mbid)
+            failed += 1
         else:
-            log.info("acousticbrainz: %s item(s) written in one pass", out.stdout.strip() or "?")
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+            applied += 1
+    return applied, failed
 
 
 def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
@@ -224,8 +199,8 @@ def run(cfg: Config, scope: str = "") -> int:
     """Enrich tracks in `scope` (whole library if empty). Returns the number of recordings enriched."""
     log = get_logger("acousticbrainz")
     sc = [scope] if scope else []
-    # Capture mbid->paths UP FRONT, in the same scoped query: file-tag injection (below) must use these, NOT a
-    # re-query AFTER _bulk_apply -- applying bpm would invalidate a scope that filters on bpm (e.g. "^bpm:1..")
+    # Capture mbid->paths UP FRONT, in the same scoped query: the file-tag injection (below) must use these,
+    # NOT a re-query after applying -- writing bpm would invalidate a scope that filters on bpm (e.g. "^bpm:1..")
     # and silently tag 0 files. One row per (recording, album), so a recording can map to several paths.
     _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
                        passname="acousticbrainz", echo_lines=False)
@@ -272,23 +247,31 @@ def run(cfg: Config, scope: str = "") -> int:
         modified[m] = fields
         enriched += 1
     if modified:
-        _bulk_apply(cfg, modified, log)
+        applied, failed = _apply(cfg, modified, log)
+        log.info("acousticbrainz: %d recording(s) applied via beet modify (%d failed)", applied, failed)
 
-    # Flex attrs -> file tags via mutagen (mediafile only writes native fields). Uses the paths captured up
-    # front (paths_by_mbid) so it can't be invalidated by the bpm write above.
-    if modified and importlib.util.find_spec("mutagen") is not None:
-        tagged = 0
-        for mbid in modified:
-            flex = {k: v for k, v in modified[mbid].items() if k in FLEX_ATTRS}
-            if not flex:
-                continue
-            for path in paths_by_mbid.get(mbid, []):
-                path = path.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
-                if Path(path).is_file() and _write_file_tags(path, flex, log):
-                    tagged += 1
-        log.info("acousticbrainz: %d file(s) tagged with flex attrs", tagged)
-    elif modified and importlib.util.find_spec("mutagen") is None:
-        log.warning("acousticbrainz: mutagen not installed -> flex attrs stay db-only (invisible to players)")
+        # native reconciliation: a final `beet write` over the SAME scope guarantees bpm/initial_key reached
+        # every enriched file -- it rewrites only files whose tags drifted from the DB (so it's a near no-op
+        # unless a modify-write failed), closing the gap that left bpm in the DB but not the file. The scope is
+        # time-based in the pipeline (`added:..`), so the just-enriched items still match it. Runs BEFORE the
+        # mutagen step so moods are the last write.
+        run_beet(cfg, ["write", *sc], passname="acousticbrainz", echo_lines=False)
+
+        # moods/flex -> file tags via mutagen: beets has NO native command to write flex attrs to file tags, so
+        # this one custom path stays. Uses the paths captured up front (paths_by_mbid).
+        if importlib.util.find_spec("mutagen") is not None:
+            tagged = 0
+            for mbid in modified:
+                flex = {k: v for k, v in modified[mbid].items() if k in FLEX_ATTRS}
+                if not flex:
+                    continue
+                for path in paths_by_mbid.get(mbid, []):
+                    path = path.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+                    if Path(path).is_file() and _write_file_tags(path, flex, log):
+                        tagged += 1
+            log.info("acousticbrainz: %d file(s) tagged with flex attrs", tagged)
+        else:
+            log.warning("acousticbrainz: mutagen not installed -> flex attrs stay db-only (invisible to players)")
 
     log.info("=== acousticbrainz: %d recording(s) enriched, %d not in AB, %d pending (retry next run) ===",
              enriched, absent, pending)
