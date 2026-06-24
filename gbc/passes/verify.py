@@ -19,7 +19,7 @@ from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
 from ..sidecars import quarantine_dir, safe_move
-from ..util import backup_db
+from ..util import backup_db, prune_empty_dirs
 
 APIKEY = os.environ.get("GBC_ACOUSTID_APIKEY", "1vOwZtEn")  # beets' shared key; set your own to avoid throttling
 MATCH_SCORE = 0.5   # AcoustID result score above which the file CONFIRMS the tagged recording
@@ -176,6 +176,7 @@ def run(cfg: Config, scope="") -> int:
     log.info("=== fingerprint verify: %d check(s), %d imposter(s) quarantined, %d mismatch(es), %d inconclusive ===",
              checked, len(moved), mismatches, incon)
     if moved:
+        prune_empty_dirs(cfg.clean)                            # remove album shells left fully empty by quarantine
         log.info("  [IMPOSTER] %d track(s) (audio != tagged recording) moved to %s -- recoverable, never deleted",
                  len(moved), cfg.dump)
     return len(moved)

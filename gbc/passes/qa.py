@@ -11,7 +11,7 @@ from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
 from ..sidecars import quarantine_dir, safe_move
-from ..util import backup_db
+from ..util import backup_db, prune_empty_dirs
 
 JUNK = re.compile(r"https?://|www\.|\.(com|net|org|tk|br)|\bEAC\b|\bLame\b|\bLAMEB?\s*\d|CDex|Easy CD-DA|Tagged By"
                   r"|Encoded by|ripped by|Created with|meXPiracy|Autodesk|bandcamp|No Comment", re.I)
@@ -84,6 +84,8 @@ def _cull(cfg: Config, paths, log) -> int:
                 log.warning("qa: `beet remove` rc=%d for %s -- stale lib entry may remain", rc, p)
             moved += 1
             log.info("CULL corrupt: %s -> %s/", fp.name, qd)
+    if moved:
+        prune_empty_dirs(cfg.clean)                # remove album shells left empty when all tracks were culled
     log.info("  [CORRUPT] %d corrupt file(s) culled to %s/corrupt -- recoverable, never deleted", moved, cfg.dump)
     return moved
 

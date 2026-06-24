@@ -50,6 +50,7 @@ class TestCull(Base):
         self.assertFalse(bad.exists())                                       # moved out of clean
         dest = self.cfg.dump / "corrupt" / "Tigran" / "Mockroot (2015)" / "03 - bad.flac"
         self.assertTrue(dest.exists())                                       # quarantine/corrupt/<artist>/<album>/
+        self.assertFalse(alb.exists())                                       # now-empty clean shell auto-pruned
 
 
 if __name__ == "__main__":

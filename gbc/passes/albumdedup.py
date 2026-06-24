@@ -12,7 +12,7 @@ from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
 from ..sidecars import quarantine_dir, safe_move
-from ..util import backup_db
+from ..util import backup_db, prune_empty_dirs
 
 SEP = "\x1f"
 MINTRACKS = 3   # >=3: same artist + count + all within TOL between DISTINCT albums is ~nil
@@ -139,5 +139,7 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
                 moved += 1
                 log.info("%s dup album: %s - %s -> %s/ (kept '%s')",
                          "DEDUP" if do_apply else "DRY ", a["artist"], a["album"], dest, albums[keeper]["album"])
+    if do_apply and moved:
+        prune_empty_dirs(cfg.clean)            # remove the now-empty artist/album shells left behind
     log.info("=== album dedup: %d duplicate album(s) -> quarantine/duplicates ===", moved)
     return moved
