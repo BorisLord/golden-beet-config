@@ -62,6 +62,16 @@ def _container_mismatch(path):
     return ""
 
 
+def _ffmpeg_corrupt(path) -> bool:
+    """True iff ffmpeg FAILS to decode `path` (returncode != 0). Gates on the RETURN CODE, never stderr:
+    valid-but-exotic files emit harmless error-level noise (Opus prints a benign 'non monotonically increasing
+    dts' warning, ape/wv/dsf print other warnings) -- gating on stderr is what false-culled 657 good Opus.
+    -xerror aborts nonzero on the first real decode error (catches mid-file corruption too)."""
+    res = subprocess.run(["ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", str(path), "-f", "null", "-"],
+                         capture_output=True, text=True)
+    return res.returncode != 0
+
+
 def _cull(cfg: Config, paths, log) -> int:
     """Move corrupt clean files to quarantine/corrupt/ (never deleted) and drop the lib entry. Identity from
     the clean path (already sanitised)."""
@@ -145,14 +155,10 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
         for p in paths:
             if Path(p).suffix.lower() in (".mp3", ".flac"):
                 continue
-            # Gate on the RETURN CODE, not stderr: valid-but-exotic files (ape/wv/dsf) emit harmless error-level
-            # noise. -xerror aborts + exits nonzero on the first decode error (catches mid-file corruption too).
-            res = subprocess.run(["ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", p, "-f", "null", "-"],
-                                 capture_output=True, text=True)
-            if res.returncode != 0:
+            if _ffmpeg_corrupt(p):
                 other_bad += 1
                 corrupt.append(p)
-                log.info("  BAD (rc=%d): %s", res.returncode, p)
+                log.info("  BAD (decode failed): %s", p)
     log.info("=== 6b. other-format decode: %d bad ===", other_bad)
 
     # 6c. container vs extension mismatch (magic bytes) -- 6/6b miss it (see _container_mismatch)

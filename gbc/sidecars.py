@@ -178,6 +178,9 @@ def prune_shells(src, dump, do_apply, log=None):
         dpath = Path(dp)
         if not dpath.is_dir():
             continue
+        if any(Path(f).suffix.lower() in AUDIO for _, _, fs in os.walk(dp) for f in fs):
+            log.warning("prune: skip %s/ -- audio appeared since the scan (not an empty shell)", dpath.name)
+            continue
         dest = quarantine_dir(dump, "shells", fallback=dpath.name)   # no audio -> no metadata, use source name
         if do_apply:
             dest.mkdir(parents=True, exist_ok=True)  # may already exist (redundant cover dumped here by apply)

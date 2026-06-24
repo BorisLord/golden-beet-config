@@ -165,7 +165,9 @@ def run(cfg: Config, scope="") -> int:
                 dest = qd / f"{Path(path).stem} ({i}){Path(path).suffix}"
             qd.mkdir(parents=True, exist_ok=True)
             if safe_move(path, dest, log):                     # move out of clean, then drop the stale lib entry
-                run_beet(cfg, ["remove", "-f", f"id:{itemid}"], passname="verify", echo_lines=False)
+                rc, _ = run_beet(cfg, ["remove", "-f", f"id:{itemid}"], passname="verify", echo_lines=False)
+                if rc:
+                    log.warning("verify: `beet remove` rc=%d for id:%s -- stale lib entry may remain", rc, itemid)
                 moved.append(path)
                 log.info("QUARANTINE imposter (audio != tagged recording): %s -> %s/", Path(path).name, qd)
 

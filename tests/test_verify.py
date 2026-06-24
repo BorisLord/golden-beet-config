@@ -117,6 +117,33 @@ class TestVerify(Base):
         self.assertEqual(n, 0)
         self.assertTrue((self.tmp / "a.m4a").exists())
 
+    def test_imposter_db_remove_issued_after_move(self):
+        """stale-DB regression: after quarantining an imposter the lib entry MUST be dropped by id, so beets
+        never points at the moved file."""
+        text = self._items([("b", "mbB")])              # single item -> id 1
+        calls = []
+        with mock.patch.object(verify, "_acoustid_available", lambda: True), \
+             mock.patch.object(verify, "run_beet", lambda cfg, a, **k: calls.append(a) or (0, text)), \
+             mock.patch.object(verify, "_file_verdict", lambda p, m: ("ok", False, None)), \
+             mock.patch.object(verify, "_official_known", lambda m: True):
+            n = verify.run(self.cfg)
+        self.assertEqual(n, 1)
+        self.assertIn(["remove", "-f", "id:1"], calls)   # DB-sync by id
+
+    def test_failed_move_leaves_file_and_no_db_remove(self):
+        """safe_move fails -> imposter stays in clean and NO lib-remove (no stale entry pointing at it)."""
+        text = self._items([("b", "mbB")])
+        calls = []
+        with mock.patch.object(verify, "_acoustid_available", lambda: True), \
+             mock.patch.object(verify, "run_beet", lambda cfg, a, **k: calls.append(a) or (0, text)), \
+             mock.patch.object(verify, "_file_verdict", lambda p, m: ("ok", False, None)), \
+             mock.patch.object(verify, "_official_known", lambda m: True), \
+             mock.patch.object(verify, "safe_move", lambda *a, **k: False):
+            n = verify.run(self.cfg)
+        self.assertEqual(n, 0)
+        self.assertTrue((self.tmp / "b.m4a").exists())   # kept in clean
+        self.assertFalse(any(a[0] == "remove" for a in calls))
+
     def test_same_artist_helper(self):
         self.assertTrue(verify._same_artist("Cypress Hill", "Cypress Hill"))
         self.assertTrue(verify._same_artist("Cypress Hill", "Cypress Hill feat. Sen Dog"))

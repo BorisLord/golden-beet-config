@@ -116,12 +116,16 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
     for aids in dup_groups:
         # keeper: MusicBrainz > Discogs, then bitrate, then lowest id (deterministic)
         keeper = max(aids, key=lambda i: (_is_mb(albums[i]["mb"]), albums[i]["br"], -int(i)))
+        keeper_folder = Path(albums[keeper]["folder"]).resolve()
         for aid in aids:
             if aid == keeper:
                 continue
             a = albums[aid]
             folder = Path(a["folder"])
             if not folder.is_dir():
+                continue
+            if folder.resolve() == keeper_folder:   # shared dir -> moving the loser would take the keeper's tracks
+                log.warning("albumdedup: skip id:%s -- shares folder with keeper (%s)", aid, folder)
                 continue
             qd = quarantine_dir(cfg.dump, "duplicates", a["artist"])   # duplicates/<Artist>/ ; folder = "Album (Year)"
             dest = qd / folder.name
