@@ -69,6 +69,17 @@ class TestAdminInit(Base):
             self.assertTrue(d.is_dir())                                           # dirs created
         self.assertTrue((self.cfg.beetsdir / "qa.yaml").exists())                 # qa overlay deployed
 
+    def test_init_fills_api_keys_from_config_env(self):
+        cenv = self.tmp / "config.env"
+        cenv.write_text('MUSIC_CLEAN="${MUSIC_CLEAN:-/x}"\nDISCOGS_TOKEN="mytoken123"\nLASTFM_KEY=""\n')
+        with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}):
+            admin.init(self.cfg, cron=False)
+        text = (self.cfg.beetsdir / "config.yaml").read_text()
+        self.assertIn("user_token: mytoken123", text)            # Discogs token injected from config.env
+        self.assertNotRegex(text, r"(?m)^\s*user_token:\s*REPLACE_ME\s*$")   # field line filled (comment may keep it)
+        self.assertRegex(text, r"(?m)^\s*lastfm_key:\s*REPLACE_ME\s*$")      # empty key -> field placeholder kept
+        self.assertRegex(text, r"(?m)^\s*fanarttv_key:\s*REPLACE_ME\s*$")    # absent key -> field placeholder kept
+
 
 if __name__ == "__main__":
     unittest.main()

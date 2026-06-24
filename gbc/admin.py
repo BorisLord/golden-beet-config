@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .config import REPO_ROOT, Config, config_path, load
+from .config import REPO_ROOT, Config, config_path, load, read_api_keys
 from .logs import get_logger
 
 CRON_MARK = "gbc inbox"
@@ -39,10 +39,16 @@ def init(cfg: Config, cron: bool = False) -> int:
         if y.name == "config.yaml":
             text = re.sub(r"(?m)^directory:.*$", f"directory: {cfg.clean}", text)
             text = re.sub(r"(?m)^  log:.*$", f"  log: {cfg.log_dir}/import-decisions.log", text)
+            keys = read_api_keys()                     # fill the API keys set in config.env (Discogs/last.fm/fanart.tv)
+            for field, val in keys.items():            # line-anchored: only the field assignment, not a comment
+                text = re.sub(rf"(?m)^(\s*{re.escape(field)}:\s*)REPLACE_ME\s*$",
+                              r"\g<1>" + val.replace("\\", r"\\"), text)
         (cfg.beetsdir / y.name).write_text(text, encoding="utf-8")
-    log.info("deployed beets/*.yaml -> %s (directory + import log filled)", cfg.beetsdir)
-    log.info("optional: set fanarttv_key / lastfm_key in %s for online art + genres",
-             cfg.beetsdir / "config.yaml")
+    nkeys = len(read_api_keys())
+    log.info("deployed beets/*.yaml -> %s (directory + import log%s filled)",
+             cfg.beetsdir, f" + {nkeys} API key(s)" if nkeys else "")
+    if nkeys < len(("discogs", "lastfm", "fanarttv")):
+        log.info("optional: set DISCOGS_TOKEN / LASTFM_KEY / FANARTTV_KEY in config.env for online match/art/genres")
 
     if cron:
         _install_cron(log)

@@ -81,6 +81,27 @@ def _source_env(path: Path) -> dict:
     return result
 
 
+# Optional API keys: config.env var -> the beets/config.yaml field whose `REPLACE_ME` `gbc init` fills.
+API_KEYS = {"DISCOGS_TOKEN": "user_token", "LASTFM_KEY": "lastfm_key", "FANARTTV_KEY": "fanarttv_key"}
+
+
+def read_api_keys() -> dict:
+    """{beets_yaml_field: value} for the API keys that are set in config.env. Empty/absent keys are skipped --
+    they're OPTIONAL (never an error, unlike the path vars). Used by `gbc init` to fill config.yaml."""
+    path = config_path()
+    bash = shutil.which("bash") or shutil.which("sh")
+    if not path or not bash:
+        return {}
+    script = 'set -a; . "$1"; ' + "".join(f'printf "%s\\0" "${{{v}-}}"; ' for v in API_KEYS)
+    out = subprocess.run([bash, "-c", script, "_", str(path)], capture_output=True, text=True)
+    if out.returncode != 0:
+        return {}
+    parts = out.stdout.split("\0")
+    return {field: parts[i].strip()
+            for i, field in enumerate(API_KEYS.values())
+            if i < len(parts) and parts[i].strip()}
+
+
 def load() -> Config:
     values = _defaults()
     path = config_path()

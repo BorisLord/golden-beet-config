@@ -66,6 +66,13 @@ class TestConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}), self.assertRaises(RuntimeError):
             config.load()
 
+    def test_read_api_keys_set_empty_absent(self):
+        cenv = self.tmp / "config.env"
+        cenv.write_text('DISCOGS_TOKEN="tok"\nLASTFM_KEY=""\n')   # set / empty / (fanarttv absent)
+        with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}):
+            keys = config.read_api_keys()
+        self.assertEqual(keys, {"user_token": "tok"})             # only the set non-empty one, mapped to yaml field
+
     def test_env_overrides_config_env(self):
         cenv = self.tmp / "config.env"
         cenv.write_text('MUSIC_CLEAN="${MUSIC_CLEAN:-/default/clean}"\n')
