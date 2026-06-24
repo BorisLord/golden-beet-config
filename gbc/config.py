@@ -59,14 +59,26 @@ def _source_env(path: Path) -> dict:
     bash = shutil.which("bash") or shutil.which("sh")
     if not bash:
         raise RuntimeError(f"no bash/sh available to source {path}")
-    # path passed as $1 (not interpolated) -> no shell injection via a weird path.
-    # `. "$1" || exit 3`: a source/syntax error aborts (without it the later printf still returns rc=0).
-    script = 'set -a; . "$1" || exit 3; ' + "".join(f'printf "%s\\0" "${v}"; ' for v in _VARS)
+    # path passed as $1 (not interpolated) -> no shell injection via a weird path. `set -eu`: ANY failing
+    # statement (not just the last) AND any unset-var reference inside config.env abort the source -> fail
+    # loudly, never source partial/garbage values. Per var emit a "set" marker (${v+1}) THEN the value, so we
+    # can tell "absent from config.env" (-> built-in default) from "present but empty" (-> hard error).
+    script = ('set -eu; set -a; . "$1"; '
+              + "".join(f'printf "%s\\0%s\\0" "${{{v}+1}}" "${{{v}-}}"; ' for v in _VARS))
     out = subprocess.run([bash, "-c", script, "_", str(path)], capture_output=True, text=True)
     if out.returncode != 0:
         raise RuntimeError(f"failed to source {path} (rc={out.returncode}): {out.stderr.strip()}")
     parts = out.stdout.split("\0")
-    return {v: parts[i].strip() for i, v in enumerate(_VARS) if i < len(parts) and parts[i].strip()}
+    result = {}
+    for i, v in enumerate(_VARS):
+        marker = parts[2 * i] if 2 * i < len(parts) else ""
+        value = parts[2 * i + 1].strip() if 2 * i + 1 < len(parts) else ""
+        if not marker:                 # var not set by config.env -> fall back to the built-in default
+            continue
+        if not value:                  # set but empty -> refuse to silently use a default (this tool moves files)
+            raise RuntimeError(f"{v} is set but empty in {path} -- refusing to fall back to a default path")
+        result[v] = value
+    return result
 
 
 def load() -> Config:

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .config import REPO_ROOT, Config, config_path
+from .config import REPO_ROOT, Config, config_path, load
 from .logs import get_logger
 
 CRON_MARK = "gbc inbox"
@@ -22,10 +22,13 @@ def init(cfg: Config, cron: bool = False) -> int:
     example = REPO_ROOT / "config.env.example"
     if not config_path() and example.exists():
         shutil.copy2(example, REPO_ROOT / "config.env")
+        cfg = load()            # re-read so dirs/YAML below use the freshly-written config, not pre-dispatch defaults
         log.info("created %s (defaults under ~/Music/beetsPipeline -- edit + re-run for other paths)",
                  REPO_ROOT / "config.env")
     elif config_path():
         log.info("using existing config.env (%s)", config_path())
+    else:
+        log.warning("no config.env and no template (%s) -- proceeding with built-in defaults", example)
 
     for d in (cfg.beetsdir, cfg.src, cfg.clean, cfg.dump, cfg.log_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -51,23 +54,36 @@ def _install_cron(log) -> None:
     if not shutil.which("crontab"):
         log.info("no crontab -- add manually: */15 * * * * PATH=%s gbc inbox", CRON_PATH)
         return
-    cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+    res = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    # rc!=0 with a real error (not the benign "no crontab for user") -> DON'T overwrite a crontab we couldn't read.
+    if res.returncode and res.stderr.strip() and "no crontab" not in res.stderr.lower():
+        log.warning("crontab -l failed (%s) -- not scheduling (refusing to overwrite)", res.stderr.strip())
+        return
+    cur = res.stdout
     if CRON_MARK in cur:
         log.info("cron already scheduled")
         return
     line = f"*/15 * * * * PATH={CRON_PATH} gbc inbox >/dev/null 2>&1\n"
-    subprocess.run(["crontab", "-"], input=cur + line, text=True)
-    log.info("cron scheduled (every 15 min: gbc inbox)")
+    w = subprocess.run(["crontab", "-"], input=cur + line, text=True)
+    if w.returncode:
+        log.warning("crontab write failed (rc=%d) -- not scheduled", w.returncode)
+    else:
+        log.info("cron scheduled (every 15 min: gbc inbox)")
 
 
 def uninstall(cfg: Config, purge: bool = False) -> int:
     log = get_logger("uninstall")
     if shutil.which("crontab"):
-        cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
-        if CRON_MARK in cur:
-            kept = "".join(ln for ln in cur.splitlines(keepends=True) if CRON_MARK not in ln)
-            subprocess.run(["crontab", "-"], input=kept, text=True)
-            log.info("removed cron entry")
+        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        if res.returncode and res.stderr.strip() and "no crontab" not in res.stderr.lower():
+            log.warning("crontab -l failed (%s) -- not touching crontab", res.stderr.strip())
+        elif CRON_MARK in res.stdout:
+            kept = "".join(ln for ln in res.stdout.splitlines(keepends=True) if CRON_MARK not in ln)
+            w = subprocess.run(["crontab", "-"], input=kept, text=True)
+            if w.returncode:
+                log.warning("crontab write failed (rc=%d) -- entry not removed", w.returncode)
+            else:
+                log.info("removed cron entry")
     if purge:
         bd, home = cfg.beetsdir.resolve(), Path.home().resolve()
         if bd == Path("/") or bd == home or bd in home.parents:   # refuse root/home/ancestor-of-home

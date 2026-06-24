@@ -45,6 +45,27 @@ class TestConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}), self.assertRaises(RuntimeError):
             config.load()
 
+    def test_empty_critical_value_raises_not_silent_default(self):
+        cenv = self.tmp / "config.env"
+        cenv.write_text('MUSIC_DUMP=""\n')                        # present but EMPTY -> must FAIL, never fall back
+        with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}), self.assertRaises(RuntimeError):
+            config.load()
+
+    def test_absent_var_falls_back_to_default(self):
+        cenv = self.tmp / "config.env"
+        cenv.write_text('MUSIC_SRC="/only/src"\n')                # BEET simply not set -> default, NOT an error
+        with mock.patch.dict(os.environ, {"HOME": str(self.tmp), "GBC_CONFIG": str(cenv)}):
+            os.environ.pop("BEET", None)
+            cfg = config.load()
+        self.assertEqual(str(cfg.src), "/only/src")
+        self.assertEqual(cfg.beet, "beet")                        # absent var -> built-in default
+
+    def test_midfile_failure_raises(self):
+        cenv = self.tmp / "config.env"
+        cenv.write_text('false\nMUSIC_SRC="/x"\n')                # a failing statement mid-file -> set -e aborts
+        with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}), self.assertRaises(RuntimeError):
+            config.load()
+
     def test_env_overrides_config_env(self):
         cenv = self.tmp / "config.env"
         cenv.write_text('MUSIC_CLEAN="${MUSIC_CLEAN:-/default/clean}"\n')
