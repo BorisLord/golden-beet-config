@@ -4,7 +4,7 @@
 name = "golden-beets-config"
 version = "0.7.0"
 description = "Recover a chaotic music library into a clean album library (beets-driven pipeline)."
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = ["filelock>=3.12", "pyacoustid>=1.3", "pyyaml>=6", "mediafile>=0.12", "mutagen>=1.45"]
 
 [project.scripts]
