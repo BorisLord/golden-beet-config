@@ -1,5 +1,6 @@
 """The pipeline: import -> upgrade -> albumdedup -> convert -> verify -> acousticbrainz -> qa -> reclaim.
-`run` + `inbox` (cron) both call it; only the trigger differs. Ordering is load-bearing: upgrade right after
+`run` + `inbox` (cron) both call it; the trigger differs and the cron door skips the costly upgrade
+full-source scan (`upgrade_scan=False`). Ordering is load-bearing: upgrade right after
 import (it acts on copies this import dup-skipped) and before albumdedup; albumdedup needs only import metadata
 so later expensive passes skip quarantined albums; convert BEFORE verify so every later pass runs identically
 on the converted (WMA->Opus, WAV/AIFF->FLAC) files.
@@ -12,7 +13,7 @@ from ..logs import get_logger
 from . import acousticbrainz, albumdedup, convert, import_, qa, reclaim, upgrade, verify
 
 
-def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False) -> int:
+def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, upgrade_scan: bool = True) -> int:
     log = get_logger("pipeline")
     wm_old = None if full else state.get_watermark(cfg)
     scope = state.added_query(wm_old)        # qa scope: items added since last run ("" = whole library)
@@ -66,7 +67,12 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False) ->
         if rc_conv:
             log.warning("convert returned rc=%d -- some originals were NOT converted (left intact in clean)", rc_conv)
 
-    _phase("upgrade", lambda: upgrade.run(cfg, apply=True))   # replace a clean album with a better dup-skipped source
+    # upgrade walks the WHOLE source for a better copy of each clean album -- a deliberate sweep too costly for the
+    # cron door (fires on every drop). `gbc run`/`--reimport`/`--all` scan; `gbc inbox` skips it (caught next sweep).
+    if upgrade_scan:
+        _phase("upgrade", lambda: upgrade.run(cfg, apply=True))
+    else:
+        log.info("pipeline: skip upgrade (cron path -- full-source scan runs on `gbc run`)")
     _phase("albumdedup", lambda: albumdedup.run(cfg))
     _phase("convert", _convert)
     _phase("verify", lambda: verify.run(cfg, scope=scope))

@@ -59,4 +59,4 @@ def run(cfg: Config) -> int:
         if not has_new(plan):
             log.info("nothing new to import -> exit")
             return 0
-        return pipeline.run(cfg)
+        return pipeline.run(cfg, upgrade_scan=False)   # cron door: skip the costly full-source upgrade scan

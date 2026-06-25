@@ -46,6 +46,20 @@ class TestPipeline(Base):
             pipeline.run(self.cfg)                                 # incremental -> key "initial" != "full"
         self.assertEqual(calls[0], "import")                       # different identity -> fresh, nothing skipped
         self.assertIn("albumdedup", calls)
+    def test_upgrade_scan_gated_off_on_cron_path(self):
+        # `gbc inbox` passes upgrade_scan=False: the costly full-source upgrade walk must NOT run on the cron door,
+        # but every other pass still does. `gbc run` (default True) keeps it.
+        for scan, expect in [(False, False), (True, True)]:
+            calls = []
+            with contextlib.ExitStack() as es:
+                for p in self._trace_all_passes(calls):
+                    es.enter_context(p)
+                rc = pipeline.run(self.cfg, upgrade_scan=scan)
+            self.assertEqual(rc, 0)
+            self.assertEqual("upgrade" in calls, expect)               # gated exactly by the flag
+            self.assertEqual(calls[0], "import")                       # the rest of the pipeline is unaffected
+            self.assertEqual(calls[-1], "reclaim")
+
     def test_qa_scope_follows_watermark(self):
         seen = {}
 
