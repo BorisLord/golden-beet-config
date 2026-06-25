@@ -1,91 +1,93 @@
 # AGENTS.md — golden-beets-config (operational brief)
 
-Check the official docs. Test every feature. These rules exist so past incidents aren't repeated. Full docs: **README.md**.
+Test every feature; check the official docs. These rules exist so past incidents don't repeat. Full docs: **README.md**.
 
 ## What
 
-A single Python app (**`gbc`**) drives **beets** (via subprocess) to recover a chaotic library into a clean
-**album** library (any Subsonic/DLNA player). Album-mode + AcoustID: only complete, strong albums are kept;
-loose singletons stay in the source for manual curation.
+`gbc` (one Python app) drives **beets** via subprocess to recover a chaotic library into a clean **album**
+library (any Subsonic/DLNA player). Album-mode + AcoustID: only complete, strong albums are kept; loose
+singletons stay in the source for manual curation.
 
 ## Architecture
 
-`gbc run` (manual) and `gbc inbox` (cron) call the same pipeline (`gbc/passes/pipeline.py`):
-**import → albumdedup → convert → verify → acousticbrainz → qa → reclaim**.
+`gbc run` (manual) + `gbc inbox` (cron) call one pipeline (`passes/pipeline.py`):
+**import → upgrade → albumdedup → convert → verify → acousticbrainz → qa → reclaim**.
 
-beets does art/genres/replaygain/scrub/ftintitle natively during `beet import` (`auto: yes`). gbc adds:
-**artfix** (pre-import: strip mime=None WMA art so scrub can't crash), **albumdedup** (cross-source duplicate
-albums), **dedup**/**sidecars** (move mode only), **convert** (WMA→Opus, WAV/AIFF→FLAC, ALAC→FLAC, BEFORE
-verify), **verify** (AcoustID imposter → quarantine), **acousticbrainz** (network BPM/key/mood), **qa**
-(audit; culls corrupt files), **reclaim**. beets is driven via `beets.run_beet` (captures stdout **and**
-stderr — `--pretend` plan goes to stderr). config in `config.py`, logger in `logs.py`, import lock (filelock)
-in `lock.py`, watermark in `state.py`. `setup.sh` is the only bash.
+beets does art/genres/replaygain/scrub/ftintitle natively on import (`auto: yes`). gbc adds, per pass:
+**artfix** (strip mime=None WMA art pre-import so scrub can't crash), **upgrade** (a better dup-skipped source
+copy replaces a clean album), **albumdedup** (cross-source dup albums), **dedup**/**sidecars** (move-mode only),
+**convert** (WMA→Opus, WAV/AIFF/ALAC→FLAC, before verify), **verify** (AcoustID imposter → quarantine),
+**acousticbrainz** (network BPM/key/mood), **qa** (audit + cull corrupt), **reclaim**. beets via
+`beets.run_beet` (captures stdout+stderr; `--pretend` → stderr). `setup.sh` is the only bash.
 
-- **Move-vs-copy is beets' decision** (`beetscfg.py` reads `beet config`). **Source CONSUMED** (`move`, or
-  `copy`+`delete`): dedup → sidecars → prune run. **Source PRESERVED** (`copy`/`reflink`/`hardlink`/symlink/
-  in-place): source is READ-ONLY, those skipped. **reclaim** runs only in preserve+`clean_independent`
-  (copy/reflink/hardlink, never symlink/in-place): per album, when every track is `verify`-verdict `ok`, the
-  whole source folder moves to `$MUSIC_DUMP` (never deleted); partial/unverified → kept. clean↔source by
-  duration-multiset (ambiguous/multi-disc → kept, never guessed).
-- **Quarantine layout** (`sidecars.quarantine_dir`): `<reason>/<Albumartist>/<Album (Year)>/…`. Reasons:
-  `imposters` (verify), `duplicates` (dedup/albumdedup), `redundant-art` (sidecars), `shells` (prune,
-  audio-less → source folder name), `converted` (convert originals), `corrupt` (qa cull), `reclaimed`
-  (verified-good source originals — purge when confident). Good (reclaimed) never mixes with bad.
-- **Logs:** one append-only `$LOG_DIR/gbc.log`, every line tagged `[pass]` + run id. beets' own decisions go
-  to `import-decisions.log`.
-- **Incremental:** qa scopes to items added since the last successful run (watermark); `--all` reprocesses.
-  import is incremental (beets `incremental: yes`).
+- **Move-vs-copy = beets' decision** (`beetscfg.py`). Source CONSUMED (move, copy+delete) → dedup/sidecars/prune
+  run. Source PRESERVED (copy/reflink/hardlink/symlink/in-place) → source READ-ONLY, those skipped. **reclaim**
+  runs only in preserve+`clean_independent`: per album, when every track is verify-`ok`, the source folder →
+  `$MUSIC_DUMP` (never deleted); partial/ambiguous/multi-disc → kept (clean↔source by duration-multiset).
+- **Quarantine** (`sidecars.quarantine_dir`): `<reason>/<Albumartist>/<Album (Year)>/…`. Reasons: `imposters`,
+  `duplicates`, `redundant-art`, `shells`, `converted`, `corrupt`, `reclaimed`, `upgraded`. Good (reclaimed/
+  upgraded) never mixes with bad.
+- **Logs:** one append-only `$LOG_DIR/gbc.log`, lines tagged `[pass]`+run-id; beets' decisions →
+  `import-decisions.log`.
+- **Incremental:** verify/ab/qa scope to items added since the last good run (watermark); `--all` reprocesses,
+  `--reimport` re-evaluates seen folders (`beet -I`). A killed run resumes via `BEETSDIR/gbc-run-progress.json`
+  (finished passes skipped). Each pass isolates per-item (`util.skip_on_error`).
 - **Tooling:** `mise run test|lint|fix|audit`; stdlib **unittest** (no pytest), no network.
+
+## Opt-in passes (manual)
+
+Clean top-folders sort via `_`: `_Singles/` (loose), `_Various Artists/`, `_Soundtracks/` — set in `config.yaml`
+`paths:`.
+- **`gbc singletons [DIR] [--apply]`** — loose source tracks + quarantined imposters → singletons in `_Singles/`;
+  then Nova-first re-tag + PROMOTE any album now complete (verified vs the live MB tracklist) into a real album.
+- **`gbc nova [--refresh-cache]`** — *detachable*: classify reconstructable Radio-Nova compils. Cache
+  `BEETSDIR/gbc-nova-cache.json`.
+- **`gbc upgrade [DIR] [--apply]`** — also runs in the pipeline. Replaces a clean album with a better source copy
+  dup-skipped at import. Correlate by duration-multiset + artist + title. Lossless replaces lossy; lossy→lossy
+  only on a ≥64k codec-efficiency effective-bitrate jump; WMA source excluded; already-lossless clean = cutoff.
 
 ## Config
 
-Paths come from `config.env` (copy of `config.env.example`, gitignored) — use the vars, never hardcode:
-`BEET`, `BEETSDIR`, `MUSIC_SRC`, `MUSIC_CLEAN`, `MUSIC_DUMP` (never `rm`), `LOG_DIR`. `config.py` resolves
-`$GBC_CONFIG` / `~/.config/gbc/` / repo root.
+Paths from `config.env` (copy of `config.env.example`, gitignored) — use the vars, never hardcode: `BEET`,
+`BEETSDIR`, `MUSIC_SRC`, `MUSIC_CLEAN`, `MUSIC_DUMP` (never `rm`), `LOG_DIR`. `config.py` resolves `$GBC_CONFIG`
+/ `~/.config/gbc/` / repo root. API keys in `beets/config.yaml` are redacted (`REPLACE_ME`) — supply your own.
 
 ## CRITICAL RULES (learned the hard way)
 
-1. **Never delete → move to `$MUSIC_DUMP`** (an `rm` once destroyed thousands of tracks). Snapshot
-   (ZFS/btrfs/LVM) before mass ops; always `cp library.db` first. Only empty dir shells may be `rmdir`'d.
+1. **Never delete → move to `$MUSIC_DUMP`** (an `rm` once destroyed thousands of tracks). Snapshot + `cp
+   library.db` before mass ops. Only empty dir shells may be `rmdir`'d.
 2. **Never bulk `modify`/`move`/`remove` without a query** (empty = whole library). Back up `library.db` first.
-3. **Confirm before any irreversible op**, in the same turn.
-4. **Test on ~10 items** before the whole library.
-5. **Scrub is mandatory on every move.** The `mime=None` crash (WMA/ASF) → strip the art FIRST via `helpers/`
-   (`scan-scrub-crash.py` → `mutagen-strip.py`/`strip-broken-art.py`, run `uv run --with mediafile --with
-   mutagen python helpers/<x>.py`). Never disable scrub.
-6. **Never `--from-logfile`** (parent paths + `;` in names → recursion). Import the directory directly.
-7. **`musicbrainz` must be in `plugins:`** — without it `chroma` yields no MB candidates and fingerprinting
+3. **Confirm before any irreversible op**, same turn; **test on ~10** before the whole library.
+4. **Scrub is mandatory on every move.** The `mime=None` crash (WMA/ASF) → strip art FIRST via `helpers/`
+   (`scan-scrub-crash.py` → `mutagen-strip.py`). Never disable scrub.
+5. **Never `--from-logfile`** (parent paths + `;` → recursion). Import the directory directly.
+6. **`musicbrainz` must be in `plugins:`** — without it `chroma` yields no MB candidates, fingerprinting
    silently finds nothing.
-8. **Never dedup on the db alone (`mb_trackid`)** — the same recording on a studio album AND a compilation is
-   legitimate. Disk-correlate (duration + bitrate), keep best bitrate, never break an album folder.
-9. **Compilations grouped by album TITLE, not albumartist**; exclude generic titles + dominant-artist albums.
-   "comp-heavy" (a hit on many comps) is NOT a comp signal.
+7. **Never dedup on the db alone (`mb_trackid`)** — the same recording on an album AND a compilation is legit.
+   Disk-correlate by duration; keep the best-QUALITY copy (lossless > lossy, then codec-normalised bitrate;
+   MB > Discogs only as an equal-quality tiebreak — `gbc/quality.py`), never break an album folder.
+8. **Compilations grouped by album TITLE, not albumartist**; exclude generic titles + dominant-artist albums
+   (comp-heavy ≠ comp).
 
 ## Verified facts (do not re-debate)
 
-- **Rate-limiting is NOT the cause of skips** (0 real 429/503 over 10k+ evals); skips = weak match + quiet mode
-  refusing to guess. No personal AcoustID key needed (non-commercial is free).
-- **WMA** is stored as "Windows Media" → query `format::Windows`, not `format:WMA`.
-- **AcousticBrainz is frozen, not dead:** the read API (`/api/v1/{low,high}-level?recording_ids=`, keyed by
-  `mb_trackid`) still serves every recording it analysed (high coverage on MB-matched tracks). Cheap network
-  pass — NOT `beets-xtractor`/Essentia (local DSP, CPU-heavy). Do NOT use beets' built-in `acousticbrainz`
-  plugin: deprecated, and its `initial_key` "F# major" is mangled to "F" by beets' `MusicalKey` regex
-  `[\W\s]+major` — our pass emits canonical "F#"/"F#m".
-- **acousticbrainz keeps a CURATED 14-field subset:** `bpm`+`initial_key` → file tags (Subsonic-visible); 7
-  `mood_*` + `danceable` + `tonal` + `key_strength` (floats, typed via `types` so `mood_relaxed:0.9..` works)
-  + `moods_mirex` + `voice_instrumental` (strings) → db flex attrs **and** injected into files as custom tags
-  (mutagen — beets has no native flex-attr file write). Applied via `beet modify` per recording, then a
-  `beet write` reconciliation; never a homemade `try_write` (it failed silently, leaving bpm in db not file).
-  Deliberately DROP: genre taxonomies, gender, timbre, ballroom rhythm, chord stats, average_loudness
-  (redundant with ReplayGain), low-level DSP.
-- **VA compilations matched via Discogs land `comp=False`** (albumartist=Various Artists but no comp flag);
-  import normalizes them to `comp=True` natively (`beet modify`) so players don't split the album by artist.
-
-## Secrets
-
-API keys in `beets/config.yaml` are redacted (`REPLACE_ME`); supply your own locally.
+- **Skips ≠ rate-limiting** (0 real 429/503 over 10k+ evals); skips = weak match + quiet mode refusing to guess.
+  No personal AcoustID key needed. **Never lower the match threshold** — a confident wrong-edition match slips
+  past `verify`.
+- **WMA** stored as "Windows Media" → query `format::Windows`, not `format:WMA`.
+- **AcousticBrainz is frozen, not dead:** read API (`/api/v1/{low,high}-level?recording_ids=`, keyed by
+  `mb_trackid`) still serves analysed recordings. NOT `beets-xtractor`/Essentia (CPU-heavy); NOT beets' built-in
+  `acousticbrainz` plugin (deprecated; mangles `initial_key` "F# major"→"F" via its `[\W\s]+major` regex — our
+  pass emits canonical "F#"/"F#m"). Keeps a curated 14-field subset: bpm+initial_key → file tags; 7 mood_* +
+  danceable/tonal/key_strength + moods_mirex/voice_instrumental → flex attrs + injected to files via mutagen,
+  applied by `beet modify` then a `beet write` reconciliation (never a homemade try_write). Drops genre/gender/
+  timbre/rhythm/chord/average_loudness/low-level DSP.
+- **VA comps matched via Discogs land `comp=False`**; import normalizes to `comp=True` (`beet modify`) so
+  players don't split by artist.
+- **Metadata sources: `musicbrainz discogs deezer bandcamp`** (Deezer ships with beets; Bandcamp needs
+  `beetcamp`; both keyless. Spotify/Beatport out — key-gated). Additive (ranked by distance), never override a
+  good MB match. More sources ≠ more recovery — the lever for loose tracks is `gbc singletons`.
 
 ## Style
 
-Concise, English. No emoji unless asked. `file:line` pointers, not pasted code. Confirm in one word. Never
-`git commit` without explicit approval.
+Concise English, no emoji. `file:line` not pasted code. Confirm in one word. Never `git commit` without explicit approval.
