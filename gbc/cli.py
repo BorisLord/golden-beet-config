@@ -6,7 +6,7 @@ from . import admin
 from . import config as configmod
 from .lock import import_lock
 from .logs import configure
-from .passes import acousticbrainz, convert, import_, inbox, nova, pipeline, qa, singletons, upgrade, verify
+from .passes import acousticbrainz, albumdedup, convert, import_, inbox, nova, pipeline, qa, singletons, upgrade, verify
 
 try:                                  # TEMPORARY/detachable -- delete restore_imposters.py to remove the command
     from .passes import restore_imposters
@@ -20,6 +20,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("run", help="full pipeline now (incremental)")
     pr.add_argument("--all", action="store_true", help="reprocess the whole library (ignore watermark)")
     pr.add_argument("--reimport", action="store_true", help="re-evaluate already-seen folders (beets -I)")
+    pr.add_argument("--no-import", action="store_true",
+                    help="skip the import pass -- re-run only the post-import passes on clean")
     sub.add_parser("inbox", help="cron door: import a drop if there's anything new, then the pipeline")
     pi = sub.add_parser("import", help="album-match import only (art/genres/replaygain run automatically)")
     pi.add_argument("source", nargs="?", help="source dir (default: MUSIC_SRC)")
@@ -39,6 +41,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pab = sub.add_parser("acousticbrainz", help="fetch BPM/key/mood metadata from AcousticBrainz")
     pab.add_argument("query", nargs="?", default="", help="scope query (default: whole library)")
     sub.add_parser("convert", help="normalise formats (WMA->AAC, WAV/AIFF->FLAC; originals -> quarantine)")
+    pad = sub.add_parser("albumdedup", help="quarantine cross-source duplicate albums (keep the best-quality copy)")
+    pad.add_argument("--pretend", action="store_true", help="report only (default: move the duplicates to quarantine)")
     pnv = sub.add_parser("nova", help="[detachable] classify reconstructable Radio-Nova compils from the library")
     pnv.add_argument("--refresh-cache", action="store_true", help="re-fetch the Nova tracklists from MusicBrainz")
     pup = sub.add_parser("upgrade", help="replace a clean album with a better source copy (also runs in the pipeline)")
@@ -62,7 +66,7 @@ def main(argv=None) -> int:
 
     if args.cmd == "run":
         with import_lock(cfg, blocking=True):
-            return pipeline.run(cfg, full=args.all, reimport=args.reimport)
+            return pipeline.run(cfg, full=args.all, reimport=args.reimport, do_import=not args.no_import)
     if args.cmd == "inbox":
         return inbox.run(cfg)
     if args.cmd == "import":
@@ -90,6 +94,9 @@ def main(argv=None) -> int:
     if args.cmd == "convert":
         with import_lock(cfg, blocking=True):
             return convert.run(cfg)
+    if args.cmd == "albumdedup":
+        with import_lock(cfg, blocking=True):
+            return albumdedup.run(cfg, do_apply=not args.pretend)
     if args.cmd == "init":
         return admin.init(cfg, cron=args.cron)
     if args.cmd == "uninstall":

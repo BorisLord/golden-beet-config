@@ -4,7 +4,7 @@ from unittest import mock
 
 from gbc import admin, cli
 from gbc import config as configmod
-from gbc.passes import convert, import_, pipeline, qa, singletons
+from gbc.passes import albumdedup, convert, import_, pipeline, qa, singletons
 from tests.base import Base
 
 
@@ -14,8 +14,8 @@ class TestCliDispatch(Base):
     def test_run_routes_full_and_reimport_flags(self):
         seen = {}
 
-        def fake_pipeline(c, *, full=False, src=None, reimport=False):
-            seen.update(full=full, reimport=reimport)
+        def fake_pipeline(c, *, full=False, src=None, reimport=False, do_import=True):
+            seen.update(full=full, reimport=reimport, do_import=do_import)
             return 0
 
         with mock.patch.object(cli, "configure", lambda *a, **k: None), \
@@ -24,6 +24,7 @@ class TestCliDispatch(Base):
             self.assertEqual(cli.main(["run", "--all", "--reimport"]), 0)
         self.assertTrue(seen.get("full"))            # --all -> full=True
         self.assertTrue(seen.get("reimport"))        # --reimport -> reimport=True
+        self.assertTrue(seen.get("do_import"))       # no --no-import -> import runs
 
     def test_qa_routes_with_scope(self):
         seen = {}
@@ -56,6 +57,26 @@ class TestCliDispatch(Base):
              mock.patch.object(configmod, "load", lambda: self.cfg), \
              mock.patch.object(convert, "run", lambda c: 0):
             self.assertEqual(cli.main(["convert"]), 0)
+
+    def test_run_no_import_flag_skips_import(self):
+        seen = {}
+        with mock.patch.object(cli, "configure", lambda *a, **k: None), \
+             mock.patch.object(configmod, "load", lambda: self.cfg), \
+             mock.patch.object(pipeline, "run",
+                               lambda c, *, full=False, src=None, reimport=False, do_import=True:
+                               seen.update(do_import=do_import) or 0):
+            self.assertEqual(cli.main(["run", "--no-import"]), 0)
+        self.assertFalse(seen.get("do_import"))      # --no-import -> post-import passes only
+
+    def test_albumdedup_takes_lock_and_routes(self):
+        seen = {}
+        with mock.patch.object(cli, "configure", lambda *a, **k: None), \
+             mock.patch.object(configmod, "load", lambda: self.cfg), \
+             mock.patch.object(albumdedup, "run", lambda c, do_apply=True: seen.update(do_apply=do_apply) or 0):
+            self.assertEqual(cli.main(["albumdedup"]), 0)
+            self.assertTrue(seen["do_apply"])         # default -> move duplicates to quarantine
+            self.assertEqual(cli.main(["albumdedup", "--pretend"]), 0)
+            self.assertFalse(seen["do_apply"])        # --pretend -> report only
 
 
 class TestAdminInit(Base):

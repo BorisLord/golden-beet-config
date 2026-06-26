@@ -13,7 +13,8 @@ from ..logs import get_logger
 from . import acousticbrainz, albumdedup, convert, import_, qa, upgrade, verify
 
 
-def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, upgrade_scan: bool = True) -> int:
+def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, upgrade_scan: bool = True,
+        do_import: bool = True) -> int:
     log = get_logger("pipeline")
     wm_old = None if full else state.get_watermark(cfg)
     scope = state.added_query(wm_old)        # qa scope: items added since last run ("" = whole library)
@@ -34,7 +35,9 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
 
     log.info("pipeline start (%s)%s", "full" if full else "incremental", f" scope={scope}" if scope else "")
 
-    if "import" not in done:
+    if not do_import:
+        log.info("pipeline: skip import (--no-import) -- running the post-import passes on clean only")
+    elif "import" not in done:
         rc = import_.run(cfg, src=src, reimport=reimport)
         if rc:
             # fail-fast: watermark NOT advanced so the next run retries this run's items
