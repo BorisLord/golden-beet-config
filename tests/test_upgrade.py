@@ -47,7 +47,7 @@ class TestUpgradeRun(Base):
         ps = [
             mock.patch.object(upgrade, "_clean_albums", lambda c: clean),
             mock.patch.object(upgrade, "_source_album_folders", lambda s: {folder: 3}),
-            mock.patch.object(upgrade, "_probe", lambda f: probe),
+            mock.patch.object(upgrade, "_probe", lambda f, c: probe),
         ]
         return ps + (extra or [])
 

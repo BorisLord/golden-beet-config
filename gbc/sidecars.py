@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 from collections import defaultdict
 from contextlib import suppress
 from pathlib import Path
@@ -82,25 +81,15 @@ def is_sidecar(fn):
     return ext in ART and bool(OFFICIAL.match(p.stem))
 
 
-def dur(path):
-    try:
-        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                              "-of", "csv=p=0", "-i", path], capture_output=True, text=True).stdout.strip()
-        return round(float(out)) if out else 0
-    except (ValueError, OSError):
-        return 0
-
-
-def durs_of(paths):
-    return sorted(d for d in (dur(p) for p in paths) if d > 0)
-
-
 def matches(a, b):                          # both sorted; same count + each pair within TOL
     return len(a) == len(b) and all(abs(x - y) <= TOL for x, y in zip(a, b, strict=True))
 
 
-def snapshot(src, out, log=None):
+def snapshot(src, out, log=None, cache=None):
     log = _log(log)
+    if cache is None:
+        from .probe import ProbeCache
+        cache = ProbeCache(None)
     audio, side = defaultdict(list), defaultdict(list)
     for dp, _, files in os.walk(src):
         for fn in files:
@@ -113,7 +102,7 @@ def snapshot(src, out, log=None):
     for d, files in side.items():
         if not audio.get(d):
             continue
-        ds = durs_of(audio[d])
+        ds = sorted(pr.length for p in audio[d] if (pr := cache.get(p)) and pr.length > 0)
         if ds:
             snap.append({"durs": ds, "files": sorted(files)})
     Path(out).write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")

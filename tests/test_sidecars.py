@@ -3,14 +3,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gbc import sidecars
+from gbc import probe, sidecars
 from tests.base import Base
 
 
 def _fake_dur(p):
-    # "NN - ...": NN*10 seconds; non-numeric basenames -> 0 (so ffprobe is never needed in tests)
+    # "NN - ...": NN*10 seconds; non-numeric basenames -> 0
     name = Path(p).name
     return int(name[:2]) * 10 if name[:2].isdigit() else 0
+
+
+def _get(self, p):
+    # a ProbeCache.get whose length follows the filename (snapshot only consumes pr.length)
+    return probe.Probe(title="", length=_fake_dur(p), bitrate=0,
+                       ext=Path(p).suffix.lower(), artist="", album="", year="")
 
 
 class TestSidecars(Base):
@@ -24,7 +30,7 @@ class TestSidecars(Base):
         (alb / "01 - song.lrc").write_text("lrc")
         (alb / "notes.txt").write_text("n")           # NOT an official sidecar
         snapf = self.tmp / "snap.json"
-        with mock.patch.object(sidecars, "dur", _fake_dur):
+        with mock.patch.object(probe.ProbeCache, "get", _get):
             self.assertEqual(sidecars.snapshot(str(self.tmp / "src"), str(snapf)), 1)
         snap = json.loads(snapf.read_text())[0]
         self.assertEqual(snap["durs"], [10, 20, 30])
@@ -39,7 +45,7 @@ class TestSidecars(Base):
         (alb / "booklet.pdf").write_text("b")
         (alb / "01 - s.lrc").write_text("l")
         snapf = self.tmp / "snap.json"
-        with mock.patch.object(sidecars, "dur", _fake_dur):
+        with mock.patch.object(probe.ProbeCache, "get", _get):
             sidecars.snapshot(str(self.tmp / "src"), str(snapf))
 
         clean = self.tmp / "clean" / "Artist" / "My Album (2020)"

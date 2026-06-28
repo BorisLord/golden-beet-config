@@ -14,6 +14,7 @@ from ..beets import run_beet
 from ..config import Config
 from ..dedup import dedup
 from ..logs import get_logger
+from ..probe import ProbeCache
 from ..util import backup_db, count_items, prune_empty_dirs
 
 
@@ -48,10 +49,12 @@ def run(cfg: Config, src=None, reimport=False) -> int:
     backup_db(cfg, "rebuild", log)
 
     if bi.source_consumed:
-        dedup(str(src), str(cfg.dump), True, log)                   # best bitrate kept
+        cache = ProbeCache(cfg.beetsdir / "gbc-probe-cache.json")   # one probe/file, shared by dedup + snapshot
+        dedup(str(src), str(cfg.dump), True, log, cache=cache)      # best bitrate kept
         snap = tempfile.NamedTemporaryFile(prefix="sidecars-", suffix=".json", delete=False).name  # noqa: SIM115
         try:
-            sidecars.snapshot(str(src), snap, log)                  # snapshot BEFORE import, while source has its audio
+            sidecars.snapshot(str(src), snap, log, cache=cache)     # snapshot BEFORE import, while source has its audio
+            cache.save()                                            # persist after both source walks (one ffprobe each)
             rc = _beet_import(cfg, src, reimport, log)
             if rc == 0:                                 # only mutate the consumed source on a CLEAN import (else retry)
                 sidecars.apply(cfg, snap, str(cfg.dump), True, log)

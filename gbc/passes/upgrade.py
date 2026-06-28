@@ -14,6 +14,7 @@ from pathlib import Path
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
+from ..probe import ProbeCache
 from ..quality import eff as _eff
 from ..quality import rank as _rank
 from ..sidecars import AUDIO, quarantine_dir, safe_move
@@ -46,10 +47,9 @@ def _is_upgrade(src_rank: int, src_ebr: int, lib_rank: int, lib_ebr: int) -> boo
     return (src_ebr - lib_ebr) >= MIN_DELTA        # both lossy -> a clear effective-bitrate jump (>= MIN_DELTA)
 
 
-def _probe(folder: Path) -> dict | None:
-    """{durs, rank, ext, br, ebr, artist} for a source album folder, read via mediafile (uniform across
-    formats -- crucially gives a normalised albumartist for the correlation guard). None if no readable audio."""
-    from mediafile import MediaFile
+def _probe(folder: Path, cache) -> dict | None:
+    """{durs, rank, ext, br, ebr, artist, album} for a source album folder, via the shared ProbeCache (uniform
+    across formats -- crucially a normalised albumartist for the correlation guard). None if no readable audio."""
     durs: list[int] = []
     exts: Counter = Counter()
     brs: list[int] = []
@@ -58,20 +58,18 @@ def _probe(folder: Path) -> dict | None:
     for f in folder.rglob("*"):
         if not (f.is_file() and f.suffix.lower() in AUDIO):
             continue
-        try:
-            mf = MediaFile(str(f))
-        except Exception:                          # one unreadable file never aborts the folder probe
+        pr = cache.get(f)
+        if pr is None:                             # one unreadable file never aborts the folder probe
             continue
-        if mf.length:
-            durs.append(round(mf.length))
-        exts[f.suffix.lower()] += 1
-        if mf.bitrate:
-            brs.append(mf.bitrate // 1000)
-        art = (mf.albumartist or mf.artist or "").strip()
-        if art:
-            artists[art] += 1
-        if (mf.album or "").strip():
-            albums[mf.album.strip()] += 1
+        if pr.length:
+            durs.append(pr.length)
+        exts[pr.ext] += 1
+        if pr.bitrate:
+            brs.append(pr.bitrate)
+        if pr.artist:
+            artists[pr.artist] += 1
+        if pr.album:
+            albums[pr.album] += 1
     if not durs:
         return None
     ext = exts.most_common(1)[0][0] if exts else ""
@@ -176,12 +174,13 @@ def run(cfg: Config, src=None, apply: bool = False) -> int:
             by_count[len(a["durs"])].append(aid)
 
     upgrades = []
+    cache = ProbeCache(cfg.beetsdir / "gbc-probe-cache.json")   # shared with dedup/snapshot; probe each file once
     for folder, n in _source_album_folders(src).items():
         cands = by_count.get(n)                          # cheap pre-filter: track count only (folder names are junk)
         if n < MINTRACKS or not cands:
             continue
         with skip_on_error(log, "upgrade", folder):
-            sp = _probe(folder)
+            sp = _probe(folder, cache)
             if not sp or len(sp["durs"]) < MINTRACKS or sp["ext"] == ".wma":   # WMA -> `convert` would transcode it
                 continue
             for aid in cands:
@@ -193,6 +192,7 @@ def run(cfg: Config, src=None, apply: bool = False) -> int:
                     if _is_upgrade(sp["rank"], sp["ebr"], a["rank"], a["ebr"]):
                         upgrades.append((folder, aid, sp, a))
                     break                          # correlated (better or not) -> don't double-count this folder
+    cache.save()
 
     if not upgrades:
         log.info("=== upgrade: no clean album has a higher-quality source copy ===")
