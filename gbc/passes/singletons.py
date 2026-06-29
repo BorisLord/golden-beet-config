@@ -1,11 +1,15 @@
-"""Singleton recovery (OPT-IN) -- import LOOSE source tracks (and quarantined imposters) as singletons, each
-matched to its MB recording by AcoustID, filed under _Singles/ (config `singleton:` path). Tracks already in
-clean DUP-SKIP by mb_trackid, so only genuinely-loose fragments are added.
+"""Singleton recovery (OPT-IN) -- import LOOSE source tracks (and quarantined imposters) as singletons, filed
+under _Singles/ (config `singleton:` path). Tracks already in clean DUP-SKIP by mb_trackid.
+
+FINGERPRINT-FIRST: before importing, every loose file is identified by its AUDIO (AcoustID) -- the source of
+truth -- and re-tagged to that recording, so the import matches it instead of skipping on bad tags. Metadata
+(MB/Discogs/Deezer/Bandcamp) corroborates at import time. What AcoustID can't identify is LEFT IN PLACE (the
+default-skip import keeps it in the source = the curation backlog); nothing is force-tagged.
 
 Then two reassembly steps run (dry unless --apply):
   1. nova.reroute() -- OPT-IN/detachable: re-tag dispersed Nova-compilation tracks to their compil (Nova first).
   2. _promote_complete() -- any album whose ENTIRE MusicBrainz tracklist is now present as singletons is
-     re-imported as a real album, routed out of _Singles/ per the paths rules. Incomplete sets stay.
+     re-imported as a real album (the inverse of verify's demote of incomplete albums). Incomplete sets stay.
 
 NOT part of `gbc run` (which stays album-only by design); run it deliberately with `gbc singletons`.
 """
@@ -20,7 +24,8 @@ from ..config import Config
 from ..logs import get_logger
 from ..mb import release_recordings
 from ..sidecars import safe_move, unique_dest
-from ..util import backup_db, count_items, prune_empty_dirs
+from ..util import backup_db, count_items, prune_empty_dirs, skip_on_error
+from . import verify  # AcoustID identity + the shared id-cache helpers live in verify
 
 try:                                  # Nova is OPT-IN + detachable: deleting nova.py just disables the re-tag
     from . import nova
@@ -39,24 +44,107 @@ def run(cfg: Config, src=None, reimport: bool = False, apply: bool = False) -> i
     dirs = [src]
     imposters = cfg.dump / "imposters"
     if imposters.is_dir():
-        dirs.append(imposters)
+        dirs.append(imposters)                     # quarantined imposters get the same fingerprint-first pass
     else:
         log.info("singletons: no %s -> imposters step skipped", imposters)
     backup_db(cfg, "singletons", log)
-    before = count_items(cfg, ["ls"], "singletons")
-    inc = "-I" if reimport else "-i"               # -I re-evaluates album-rejected folders as singletons
+    # FINGERPRINT-FIRST: identify every loose file by its audio + re-tag to the true recording BEFORE import,
+    # so a bad tag no longer makes it skip. Cached -> re-runs only fingerprint new files.
+    cache = verify.load_idcache(cfg)               # shared with verify: imposter identities are already in here
+    clean_ids = _clean_recording_ids(cfg)          # so a loose copy of a track already in clean is NOT re-added
     for d in dirs:
-        artfix.run(cfg, src=d, log=log)            # strip mime=None WMA art so scrub can't crash beet import
-        rc, _ = run_beet(cfg, ["import", "-q", "-s", inc, str(d)], passname="singletons")
-        if rc:
-            log.error("beet import -s %s failed (rc=%d) -- nothing deleted", d, rc)
-            return rc
-    added = count_items(cfg, ["ls"], "singletons") - before   # already-present tracks dup-skip; delta = new ones
-    log.info("singletons: +%d loose track(s) recovered -> _Singles/", added)
+        _fingerprint_retag(cfg, d, cache, clean_ids, log, apply)
+    verify.save_idcache(cfg, cache)
+    # DRY-RUN = identification only. The import must NOT run dry: it would mark the folders "seen" (incremental),
+    # so a later `--apply` would skip the now-re-tagged files. So gate import + re-tag-dependent steps on --apply.
+    if apply:
+        before = count_items(cfg, ["ls"], "singletons")
+        inc = "-I" if reimport else "-i"           # -I re-evaluates album-rejected folders as singletons
+        for d in dirs:
+            artfix.run(cfg, src=d, log=log)        # strip mime=None WMA art so scrub can't crash beet import
+            rc, _ = run_beet(cfg, ["import", "-q", "-s", inc, str(d)], passname="singletons")
+            if rc:
+                log.error("beet import -s %s failed (rc=%d) -- nothing deleted", d, rc)
+                return rc
+        added = count_items(cfg, ["ls"], "singletons") - before   # already-present tracks dup-skip; delta = new
+        log.info("singletons: +%d loose track(s) recovered -> _Singles/", added)
+    else:
+        log.info("singletons: dry-run -- identification only; re-run with --apply to re-tag + import")
     if nova is not None:
         nova.reroute(cfg, log, apply)              # NOVA FIRST: dispersed Nova tracks regroup under their compil
     _promote_complete(cfg, log, apply)             # then promote ANY now-complete album out of _Singles/
     return 0
+
+
+_AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".wav", ".aiff", ".aif"}
+
+
+def _clean_recording_ids(cfg: Config) -> set:
+    """Every mb_trackid currently in the clean library (snapshot, ONE query). A loose track whose AUDIO maps to
+    ANY of these is already in clean -> we re-tag it to that in-clean id so beets DUP-skips it at import instead
+    of adding a second copy as a singleton (the album's recording id often differs from AcoustID's dominant
+    pick, so the bare mb_trackid match would miss it)."""
+    _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid", "mb_trackid::."], passname="singletons", echo_lines=False)
+    return {ln.strip() for ln in text.splitlines() if ln.strip()}
+
+
+def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set, log, apply: bool) -> tuple[int, int]:
+    """Fingerprint-FIRST identity for every loose audio file under `directory`: ask AcoustID what the audio
+    really is and overwrite its artist/title/mb_trackid with that recording, so the singleton import matches it
+    instead of skipping on bad tags (audio = source of truth; metadata only corroborates at import). If the
+    audio is ALREADY in clean (any of its recording ids in `clean_ids`), re-tag it to the in-clean id so the
+    import DUP-skips it rather than adding a duplicate single. Ambiguous/unidentifiable files are LEFT UNTOUCHED.
+    `cache` is verify's SHARED id-cache; values are [rid, artist, title, [all_ids]] (or the 3-field form verify
+    pre-writes for imposters), or null. Writes only with --apply. Returns (identified, left)."""
+    if not verify._acoustid_available():
+        log.info("%s: pyacoustid absent -> AcoustID identify skipped", directory.name)
+        return 0, 0
+    try:
+        import mediafile
+    except ImportError:
+        log.info("%s: mediafile absent -> AcoustID identify skipped", directory.name)
+        return 0, 0
+    fixed = dup = left = scanned = 0
+    for p in sorted(directory.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in _AUDIO_EXT:
+            continue
+        scanned += 1
+        if scanned % 500 == 0:                 # liveness on a huge source (the fingerprint walk is silent + slow)
+            log.info("  ...%s: %d scanned (%d new, %d dup, %d left)", directory.name, scanned, fixed, dup, left)
+        with skip_on_error(log, "singletons", p.name):
+            key = verify.idcache_key(p)
+            if key is None:                        # unreadable file (stat failed) -> skip
+                continue
+            if key in cache:
+                entry = cache[key]                 # cached (incl. imposter identities verify pre-wrote) -> no lookup
+            else:
+                results = verify._lookup(str(p))
+                tup = verify._dominant_from_results(results) if results is not None else None
+                entry = [*tup, sorted(verify._all_recording_ids(results))] if tup else None
+                cache[key] = entry
+            if not entry:
+                left += 1
+                continue
+            rid, artist, title = entry[0], entry[1], entry[2]
+            all_ids = set(entry[3]) if len(entry) > 3 else {rid}   # 3-field (verify) -> dominant only
+            in_clean = all_ids & clean_ids
+            tag_id = sorted(in_clean)[0] if in_clean else rid      # in-clean id -> the import DUP-skips it
+            if in_clean:
+                dup += 1
+            else:
+                fixed += 1
+            log.info("  re-id%s: %s -> %s - %s [%s]%s", "" if apply else " (dry)", p.name, artist, title, tag_id,
+                     "  (already in clean -> dup-skip)" if in_clean else "")
+            if apply:
+                mf = mediafile.MediaFile(str(p))
+                mf.title = title
+                if artist:
+                    mf.artist = artist
+                mf.mb_trackid = tag_id
+                mf.save()
+    log.info("%s: %d new identified, %d already-in-clean (dup-skip), %d unidentified%s",
+             directory.name, fixed, dup, left, "" if apply else " (dry-run, not written)")
+    return fixed, left
 
 
 def _promote_complete(cfg: Config, log, apply: bool) -> int:

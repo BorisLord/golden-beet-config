@@ -24,7 +24,7 @@ class TestSingletons(Base):
         self.cfg.src.mkdir(parents=True, exist_ok=True)
         calls = []
         with self._stack(self._patches(calls, counts=iter([5, 8]))):
-            rc = singletons.run(self.cfg)
+            rc = singletons.run(self.cfg, apply=True)
         self.assertEqual(rc, 0)
         imp = next(c for c in calls if c and c[0] == "import")
         self.assertIn("-s", imp)                         # singleton mode
@@ -35,7 +35,7 @@ class TestSingletons(Base):
         self.cfg.src.mkdir(parents=True, exist_ok=True)
         calls = []
         with self._stack(self._patches(calls, counts=iter([0, 0]))):
-            singletons.run(self.cfg, reimport=True)
+            singletons.run(self.cfg, reimport=True, apply=True)
         imp = next(c for c in calls if c and c[0] == "import")
         self.assertIn("-I", imp)                         # --reimport -> noincremental
         self.assertNotIn("-i", imp)
@@ -44,14 +44,14 @@ class TestSingletons(Base):
         self.cfg.src.mkdir(parents=True, exist_ok=True)
         calls = []
         with self._stack(self._patches(calls, counts=iter([0, 0]), rc=2)):
-            self.assertEqual(singletons.run(self.cfg), 2)
+            self.assertEqual(singletons.run(self.cfg, apply=True), 2)
 
     def test_also_imports_imposters_when_present(self):
         self.cfg.src.mkdir(parents=True, exist_ok=True)
         (self.cfg.dump / "imposters").mkdir(parents=True, exist_ok=True)
         calls = []
         with self._stack(self._patches(calls, counts=iter([0, 0]))):
-            singletons.run(self.cfg)
+            singletons.run(self.cfg, apply=True)
         imports = [c for c in calls if c and c[0] == "import"]
         self.assertEqual(len(imports), 2)                                 # source + quarantine/imposters
         self.assertEqual(imports[0][-1], str(self.cfg.src))
@@ -61,8 +61,95 @@ class TestSingletons(Base):
         self.cfg.src.mkdir(parents=True, exist_ok=True)                   # no dump/imposters dir
         calls = []
         with self._stack(self._patches(calls, counts=iter([0, 0]))):
-            singletons.run(self.cfg)
+            singletons.run(self.cfg, apply=True)
         self.assertEqual(len([c for c in calls if c and c[0] == "import"]), 1)   # source only
+
+    # --- _fingerprint_retag: AcoustID-first identity + dedup of loose tracks/imposters before re-import ---
+
+    @staticmethod
+    def _results(rid="mbTrue", title="TrueTitle", artist="TrueArtist", extra_ids=()):
+        recs = [{"id": i, "title": title, "artists": [{"name": artist}]} for i in (rid, *extra_ids)]
+        return [{"score": 0.95, "recordings": recs}]
+
+    def test_fingerprint_retag_writes_true_recording_on_apply(self):
+        from gbc.passes import verify as verifymod
+        d = self.cfg.dump / "imposters"
+        (d / "A" / "Alb (2001)").mkdir(parents=True, exist_ok=True)
+        (d / "A" / "Alb (2001)" / "01 - wrong.flac").write_bytes(b"x")
+        saved = {}
+
+        class FakeMF:
+            def __init__(self, path):
+                self.title = self.artist = self.mb_trackid = None
+
+            def save(self):
+                saved.update(title=self.title, artist=self.artist, mb_trackid=self.mb_trackid)
+
+        with mock.patch.object(verifymod, "_acoustid_available", lambda: True), \
+             mock.patch.object(verifymod, "_lookup", lambda p: self._results()), \
+             mock.patch("mediafile.MediaFile", FakeMF):
+            fixed, left = singletons._fingerprint_retag(self.cfg, d, {}, set(), mock.MagicMock(), apply=True)
+        self.assertEqual((fixed, left), (1, 0))
+        self.assertEqual(saved, {"title": "TrueTitle", "artist": "TrueArtist", "mb_trackid": "mbTrue"})
+
+    def test_fingerprint_retag_dedups_against_clean(self):
+        # audio maps to mbTrue (dominant) + mbAlbum (same audio, the album's recording id). mbAlbum is in clean
+        # -> NOT a new single: re-tag to mbAlbum so the import dup-skips it (the bug the user spotted).
+        from gbc.passes import verify as verifymod
+        d = self.cfg.dump / "imposters"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "dupe.flac").write_bytes(b"x")
+        saved = {}
+
+        class FakeMF:
+            def __init__(self, path):
+                self.title = self.artist = self.mb_trackid = None
+
+            def save(self):
+                saved["mb_trackid"] = self.mb_trackid
+
+        with mock.patch.object(verifymod, "_acoustid_available", lambda: True), \
+             mock.patch.object(verifymod, "_lookup", lambda p: self._results(extra_ids=("mbAlbum",))), \
+             mock.patch("mediafile.MediaFile", FakeMF):
+            fixed, left = singletons._fingerprint_retag(self.cfg, d, {}, {"mbAlbum"}, mock.MagicMock(), apply=True)
+        self.assertEqual((fixed, left), (0, 0))               # not counted as a NEW single
+        self.assertEqual(saved["mb_trackid"], "mbAlbum")      # tagged the IN-CLEAN id -> import dup-skips it
+
+    def test_fingerprint_retag_dry_run_does_not_write(self):
+        from gbc.passes import verify as verifymod
+        d = self.cfg.dump / "imposters"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "x.flac").write_bytes(b"x")
+        opened = []
+        with mock.patch.object(verifymod, "_acoustid_available", lambda: True), \
+             mock.patch.object(verifymod, "_lookup", lambda p: self._results()), \
+             mock.patch("mediafile.MediaFile", lambda p: opened.append(p)):
+            fixed, left = singletons._fingerprint_retag(self.cfg, d, {}, set(), mock.MagicMock(), apply=False)
+        self.assertEqual((fixed, left), (1, 0))
+        self.assertEqual(opened, [])              # dry-run: no file opened for writing
+
+    def test_fingerprint_retag_leaves_unidentified_in_place(self):
+        from gbc.passes import verify as verifymod
+        d = self.cfg.dump / "imposters"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "x.flac").write_bytes(b"x")
+        with mock.patch.object(verifymod, "_acoustid_available", lambda: True), \
+             mock.patch.object(verifymod, "_lookup", lambda p: None):   # AcoustID can't identify
+            fixed, left = singletons._fingerprint_retag(self.cfg, d, {}, set(), mock.MagicMock(), apply=True)
+        self.assertEqual((fixed, left), (0, 1))
+
+    def test_fingerprint_retag_cache_skips_repeat_lookup(self):
+        from gbc.passes import verify as verifymod
+        d = self.cfg.dump / "imposters"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "x.flac").write_bytes(b"x")
+        calls = []
+        cache: dict = {}
+        with mock.patch.object(verifymod, "_acoustid_available", lambda: True), \
+             mock.patch.object(verifymod, "_lookup", lambda p: calls.append(p) or None):
+            singletons._fingerprint_retag(self.cfg, d, cache, set(), mock.MagicMock(), apply=False)
+            singletons._fingerprint_retag(self.cfg, d, cache, set(), mock.MagicMock(), apply=False)
+        self.assertEqual(len(calls), 1)           # 2nd run hits the cache -> AcoustID called only once
 
     # --- _promote_complete: robust completeness via the live MB tracklist ---
 
