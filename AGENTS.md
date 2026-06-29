@@ -16,7 +16,7 @@ singletons stay in the source for manual curation.
 beets does art/genres/replaygain/scrub/ftintitle natively on import (`auto: yes`). gbc adds, per pass:
 **artfix** (strip mime=None WMA art pre-import so scrub can't crash), **upgrade** (a better dup-skipped source
 copy replaces a clean album), **albumdedup** (cross-source dup albums), **dedup**/**sidecars** (move-mode only),
-**convert** (WMA→Opus, WAV/AIFF/ALAC→FLAC, before verify), **verify** (AcoustID imposter → quarantine),
+**convert** (WMA→Opus, WAV/AIFF/ALAC→FLAC, hi-res FLAC >48kHz/>16bit→16-bit/≤48kHz, before verify), **verify** (AcoustID imposter → quarantine),
 **acousticbrainz** (network BPM/key/mood), **qa** (audit + cull corrupt). beets via
 `beets.run_beet` (captures stdout+stderr; `--pretend` → stderr). `setup.sh` is the only bash.
 
@@ -24,8 +24,8 @@ copy replaces a clean album), **albumdedup** (cross-source dup albums), **dedup*
   run. Source PRESERVED (copy/reflink/hardlink/symlink/in-place) → source READ-ONLY, those skipped; gbc never
   mutates a preserved source (the source stays the curation backlog; `gbc singletons` dup-skips what's already clean).
 - **Quarantine** (`sidecars.quarantine_dir`): `<reason>/<Albumartist>/<Album (Year)>/…`. Reasons: `imposters`,
-  `duplicates`, `redundant-art`, `shells`, `converted`, `corrupt`, `upgraded`. Good (`upgraded`) never mixes
-  with bad.
+  `duplicates`, `redundant-art`, `shells`, `converted`, `downsampled`, `corrupt`, `upgraded`. Good (`upgraded`,
+  `downsampled` = the hi-res masters) never mixes with bad.
 - **Logs:** one append-only `$LOG_DIR/gbc.log`, lines tagged `[pass]`+run-id; beets' decisions →
   `import-decisions.log`.
 - **Incremental:** verify/ab/qa scope to items added since the last good run (watermark); `--all` reprocesses,

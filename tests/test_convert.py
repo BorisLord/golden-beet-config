@@ -26,10 +26,52 @@ class TestConvert(Base):
         self.assertEqual(len(convs), 1)                                     # stopped after the first failure
 
     def test_successful_convert_returns_zero(self):
-        counts = iter([1, 1, 1, 0, 0, 0])   # 3 jobs pending (comprehension), then 0 remain after each convert
-        p1, p2, p3 = self._patches(lambda *a, **k: next(counts), lambda cfg, args, **k: (0, ""))
+        p1, p2, p3 = self._patches(lambda *a, **k: 1,                       # every job pending
+                                   lambda cfg, args, **k: (0, ""))          # every convert + ls succeeds
         with p1, p2, p3:
             self.assertEqual(convert.run(self.cfg), 0)
+
+    def test_hires_flac_downsampled_to_flac16(self):
+        # only hi-res FLAC present (>48 kHz) -> exactly one convert, to flac16, scoped by the samplerate range
+        calls = []
+
+        def count(cfg, args, passname):
+            return 1 if "samplerate:48001.." in args else 0
+
+        def run_beet(cfg, args, **k):
+            calls.append(args)
+            return (0, "")
+
+        with mock.patch.object(convert, "count_items", count), \
+             mock.patch.object(convert, "run_beet", run_beet), \
+             mock.patch.object(convert, "backup_db", lambda *a, **k: None):
+            self.assertEqual(convert.run(self.cfg), 0)
+        conv = [a for a in calls if a and a[0] == "convert"]
+        self.assertEqual(len(conv), 1)
+        self.assertIn("flac16", conv[0])
+        self.assertIn("format:FLAC", conv[0])
+        self.assertIn("samplerate:48001..", conv[0])
+
+    def test_24bit_flac_downsampled_to_flac16(self):
+        # 24-bit FLAC at a normal rate is caught by the bit-depth job (not the samplerate one)
+        calls = []
+
+        def count(cfg, args, passname):
+            return 1 if "bitdepth:17.." in args else 0
+
+        def run_beet(cfg, args, **k):
+            calls.append(args)
+            return (0, "")
+
+        with mock.patch.object(convert, "count_items", count), \
+             mock.patch.object(convert, "run_beet", run_beet), \
+             mock.patch.object(convert, "backup_db", lambda *a, **k: None):
+            self.assertEqual(convert.run(self.cfg), 0)
+        conv = [a for a in calls if a and a[0] == "convert"]
+        self.assertEqual(len(conv), 1)
+        self.assertIn("flac16", conv[0])
+        self.assertIn("bitdepth:17..", conv[0])
+        self.assertIn("samplerate:..48000", conv[0])    # disjoint from the >48 kHz job -> no double count
 
     def test_failed_encode_reaps_stale_row(self):
         # a WMA still matching the query AFTER convert but whose file vanished = failed encode (keep_new moved

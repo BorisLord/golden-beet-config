@@ -2,6 +2,7 @@
 #   WMA (lossy, proprietary/legacy ASF: poor players, weak tags, scrub mime=None crash) -> Opus (open)
 #   WAV + AIFF (uncompressed PCM, ~no tags, huge)                                        -> FLAC (lossless)
 #   ALAC (Apple Lossless, Apple-only ecosystem)                                          -> FLAC (lossless, universal)
+#   hi-res FLAC (>48 kHz and/or >16-bit, e.g. 24/192)                                     -> 16-bit/<=48 kHz FLAC
 # Lossless source -> FLAC = ZERO quality loss + tags + ~half the size. Lossy WMA -> Opus = open + best
 # quality/bitrate; the helper sets the Opus bitrate FROM the source bitrate (adaptive, [48,256] kbps) so a
 # bad source stays low-bitrate (still flagged by qa's <192k check, never masked) and a good one isn't
@@ -15,6 +16,9 @@ convert:
       extension: opus
     flac:
       command: sh @HELPERS@/flac-encode.sh $source $dest  # validates the FLAC decodes before keep_new moves the original
+      extension: flac
+    flac16:
+      command: sh @HELPERS@/flac-downsample.sh $source $dest  # hi-res (>48kHz/>16bit) FLAC -> 16-bit/<=48kHz FLAC
       extension: flac
   keep_new: yes               # converted file replaces the item in the library; original -> dest (quarantine)
   embed: yes                  # re-embed album art into the converted file
