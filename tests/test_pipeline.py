@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 from gbc import state
-from gbc.passes import acousticbrainz, albumdedup, convert, import_, pipeline, qa, upgrade, verify
+from gbc.passes import acousticbrainz, albumdedup, convert, import_, junk, pipeline, qa, upgrade, verify
 from tests.base import Base
 
 
@@ -15,6 +15,7 @@ class TestPipeline(Base):
             mock.patch.object(upgrade, "run", lambda c, *a, **k: calls.append("upgrade") or 0),
             mock.patch.object(albumdedup, "run", lambda c, *a, **k: calls.append("albumdedup") or 0),
             mock.patch.object(convert, "run", lambda c, *a, **k: calls.append("convert") or 0),
+            mock.patch.object(junk, "run", lambda c, *a, **k: calls.append("junk") or 0),
             mock.patch.object(verify, "run", lambda c, *a, **k: calls.append("verify") or 0),
             mock.patch.object(acousticbrainz, "run", lambda c, *a, **k: calls.append("acousticbrainz") or 0),
             mock.patch.object(qa, "run", lambda c, *a, **k: calls.append("qa") or 0),
@@ -32,7 +33,7 @@ class TestPipeline(Base):
         self.assertEqual(rc, 0)
         self.assertNotIn("import", calls)                          # skipped -> no source re-walk
         self.assertNotIn("upgrade", calls)
-        self.assertEqual(calls, ["albumdedup", "convert", "verify", "acousticbrainz", "qa"])
+        self.assertEqual(calls, ["albumdedup", "convert", "junk", "verify", "acousticbrainz", "qa"])
         self.assertEqual(state.get_progress(self.cfg), {})         # cleared on clean finish
         self.assertEqual(state.get_watermark(self.cfg), "2026-06-25T10:00:00")  # the resumed wm_new is reused
 
@@ -56,6 +57,7 @@ class TestPipeline(Base):
                    mock.patch.object(upgrade, "run", lambda c, *a, **k: 0),
                    mock.patch.object(albumdedup, "run", lambda c, *a, **k: 0),
                    mock.patch.object(convert, "run", lambda c, *a, **k: 0),
+                   mock.patch.object(junk, "run", lambda c, *a, **k: 0),
                    mock.patch.object(verify, "run", boom),         # one file-moving pass errors
                    mock.patch.object(acousticbrainz, "run", lambda c, *a, **k: 0),
                    mock.patch.object(qa, "run", lambda c, *a, **k: 0)]
@@ -94,6 +96,7 @@ class TestPipeline(Base):
              mock.patch.object(upgrade, "run", lambda *a, **k: 0), \
              mock.patch.object(albumdedup, "run", lambda *a, **k: 0), \
              mock.patch.object(convert, "run", lambda *a, **k: 0), \
+             mock.patch.object(junk, "run", lambda *a, **k: 0), \
              mock.patch.object(verify, "run", lambda *a, **k: 0), \
              mock.patch.object(acousticbrainz, "run", lambda *a, **k: 0), \
              mock.patch.object(qa, "run", fake_qa):
