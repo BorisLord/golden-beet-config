@@ -22,7 +22,7 @@ from .. import artfix
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
-from ..mb import release_recordings
+from ..mb import load_release_cache, release_recordings, save_release_cache
 from ..sidecars import safe_move, unique_dest
 from ..util import backup_db, count_items, prune_empty_dirs, skip_on_error
 from . import verify  # AcoustID identity + the shared id-cache helpers live in verify
@@ -50,11 +50,15 @@ def run(cfg: Config, src=None, reimport: bool = False, apply: bool = False) -> i
     backup_db(cfg, "singletons", log)
     # FINGERPRINT-FIRST: identify every loose file by its audio + re-tag to the true recording BEFORE import,
     # so a bad tag no longer makes it skip. Cached -> re-runs only fingerprint new files.
-    cache = verify.load_idcache(cfg)               # shared with verify: imposter identities are already in here
+    cache = verify.load_idcache(cfg)               # prior identities (incl. verify's imposters) + resume state.
+    # Unlike the MB tracklist cache, the idcache is intentionally NOT refreshed by --reimport: re-fingerprinting
+    # the whole source is a multi-day op, so cached AcoustID identities (incl. `null` for unidentified files)
+    # persist across runs. To force a clean re-fingerprint, delete BEETSDIR/gbc-acoustid-id-cache.jsonl.
     clean_ids = _clean_recording_ids(cfg)          # so a loose copy of a track already in clean is NOT re-added
     for d in dirs:
         _fingerprint_retag(cfg, d, cache, clean_ids, log, apply)
-    verify.save_idcache(cfg, cache)
+    # (no save here: _fingerprint_retag APPENDS each fresh identity to the JSONL cache as it goes -- a killed walk
+    # resumes from the last line and never holds the whole cache in RAM)
     # DRY-RUN = identification only. The import must NOT run dry: it would mark the folders "seen" (incremental),
     # so a later `--apply` would skip the now-re-tagged files. So gate import + re-tag-dependent steps on --apply.
     if apply:
@@ -72,7 +76,7 @@ def run(cfg: Config, src=None, reimport: bool = False, apply: bool = False) -> i
         log.info("singletons: dry-run -- identification only; re-run with --apply to re-tag + import")
     if nova is not None:
         nova.reroute(cfg, log, apply)              # NOVA FIRST: dispersed Nova tracks regroup under their compil
-    _promote_complete(cfg, log, apply)             # then promote ANY now-complete album out of _Singles/
+    _promote_complete(cfg, log, apply, reimport)   # then promote ANY now-complete album out of _Singles/
     return 0
 
 
@@ -121,7 +125,7 @@ def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set
                 results = verify._lookup(str(p))
                 tup = verify._dominant_from_results(results) if results is not None else None
                 entry = [*tup, sorted(verify._all_recording_ids(results))] if tup else None
-                cache[key] = entry
+                verify.append_idcache(cfg, key, entry)   # persist now (resume) without holding the cache in RAM
             if not entry:
                 left += 1
                 continue
@@ -147,11 +151,12 @@ def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set
     return fixed, left
 
 
-def _promote_complete(cfg: Config, log, apply: bool) -> int:
+def _promote_complete(cfg: Config, log, apply: bool, refresh: bool = False) -> int:
     """Group loose singletons by their matched release; an album whose ENTIRE MusicBrainz tracklist is now
     present as singletons is re-imported as a real album (beets routes it to <artist>/_Various Artists/
     _Soundtracks per the paths rules). ROBUST: completeness is decided against the live MB release tracklist,
-    not the stored `tracktotal` -- tracktotal is only a cheap pre-filter to skip pointless MB calls."""
+    not the stored `tracktotal` -- tracktotal is only a cheap pre-filter to skip pointless MB calls. `refresh`
+    (a --reimport run) re-pulls the persisted MB tracklist cache instead of reusing it."""
     _, text = run_beet(cfg, ["ls", "-f", "$mb_albumid\t$id\t$mb_trackid\t$tracktotal\t$path",
                              "singleton:1", "mb_albumid::."], passname="singletons", echo_lines=False)
     albums: dict = defaultdict(lambda: {"items": [], "total": 0})
@@ -164,7 +169,7 @@ def _promote_complete(cfg: Config, log, apply: bool) -> int:
             a = albums[albumid.strip()]
             a["items"].append((sid.strip(), tid.strip(), path))
             a["total"] = max(a["total"], int(tt) if tt.strip().isdigit() else 0)
-    cache: dict = {}
+    cache = load_release_cache(cfg, refresh)          # persisted MB tracklists, shared with verify's demote
     promoted = 0
     for albumid, a in albums.items():
         items = a["items"]
@@ -178,6 +183,7 @@ def _promote_complete(cfg: Config, log, apply: bool) -> int:
             continue
         if _assemble_album(cfg, albumid, items, log, apply):
             promoted += 1
+    save_release_cache(cfg, cache)                     # persist tracklists fetched this pass for the next run/pass
     log.info("singletons: %d complete album(s) %s out of _Singles/",
              promoted, "promoted" if apply else "would be promoted")
     return promoted

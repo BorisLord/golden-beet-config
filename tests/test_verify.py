@@ -264,10 +264,32 @@ class TestVerify(Base):
         f.write_bytes(b"abc")
         k = verify.idcache_key(f)
         self.assertTrue(k.startswith(str(f)))
-        verify.save_idcache(self.cfg, {k: ["r", "a", "t"], "/gone/x.flac:1:2": ["r2", "a2", "t2"]})
+        verify.save_idcache(self.cfg, {k: ["r", "a", "t"], "/gone/x.flac": ["r2", "a2", "t2"]})
         reloaded = verify.load_idcache(self.cfg)
         self.assertEqual(reloaded.get(k), ["r", "a", "t"])          # live file kept
-        self.assertNotIn("/gone/x.flac:1:2", reloaded)              # missing file evicted
+        self.assertNotIn("/gone/x.flac", reloaded)                 # missing file evicted
+
+    def test_idcache_appends_incrementally_and_survives_retag(self):
+        self.cfg.beetsdir.mkdir(parents=True, exist_ok=True)
+        f = self.cfg.beetsdir / "g.flac"
+        f.write_bytes(b"abc")
+        k = verify.idcache_key(f)
+        verify.append_idcache(self.cfg, k, ["r", "a", "t", ["r"]])
+        # on disk immediately (no end-of-run save) -> a killed walk resumes from here
+        self.assertEqual(verify.load_idcache(self.cfg).get(k), ["r", "a", "t", ["r"]])
+        # a re-tag bumps mtime+size but NOT the path -> key unchanged -> still a cache HIT on relaunch
+        f.write_bytes(b"abcdefgh-much-bigger")
+        self.assertEqual(verify.idcache_key(f), k)
+        self.assertIn(k, verify.load_idcache(self.cfg))
+
+    def test_idcache_migrates_legacy_json_blob(self):
+        self.cfg.beetsdir.mkdir(parents=True, exist_ok=True)
+        f = self.cfg.beetsdir / "h.flac"
+        f.write_bytes(b"x")
+        (self.cfg.beetsdir / verify.LEGACY_IDCACHE).write_text(json.dumps({str(f): ["r", "a", "t"]}))
+        reloaded = verify.load_idcache(self.cfg)                    # one-time migration of the old single-blob form
+        self.assertEqual(reloaded.get(str(f)), ["r", "a", "t"])
+        self.assertFalse((self.cfg.beetsdir / verify.LEGACY_IDCACHE).exists())   # legacy dropped after migration
 
     def test_imposter_identity_cached_for_singletons(self):
         text = self._items([("b", "mbB")])
@@ -278,7 +300,7 @@ class TestVerify(Base):
              mock.patch.object(verify, "run_beet", lambda *a, **k: (0, text)), \
              mock.patch.object(verify, "_file_verdict", lambda p, m: fv[Path(p).stem]):
             verify.run(self.cfg)
-        idcache = json.loads((self.cfg.beetsdir / verify.IDCACHE).read_text())
+        idcache = verify.load_idcache(self.cfg)            # JSONL append-only -> read back via the public API
         self.assertIn(["mbDen", "Den Harrow", "OtherSong"], list(idcache.values()))
 
 

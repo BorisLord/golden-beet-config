@@ -88,7 +88,7 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
         log.info("pipeline: skip upgrade (cron path -- full-source scan runs on `gbc run`)")
     _phase("albumdedup", lambda: albumdedup.run(cfg))
     _phase("convert", _convert)
-    _phase("verify", lambda: verify.run(cfg, scope=scope))
+    _phase("verify", lambda: verify.run(cfg, scope=scope, refresh=full))
     _phase("acousticbrainz", lambda: acousticbrainz.run(cfg, scope=scope))
     _phase("qa", lambda: qa.run(cfg, scope=scope, cull=True))
 

@@ -16,9 +16,9 @@ from pathlib import Path
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
-from ..mb import missing_recordings
+from ..mb import load_release_cache, missing_recordings, save_release_cache
 from ..sidecars import quarantine_dir, safe_move, unique_dest
-from ..util import backup_db, prune_empty_dirs, skip_on_error, write_json
+from ..util import backup_db, prune_empty_dirs, skip_on_error, write_json, write_text
 
 APIKEY = os.environ.get("GBC_ACOUSTID_APIKEY", "1vOwZtEn")  # beets' shared key; set your own to avoid throttling
 MATCH_SCORE = 0.5   # AcoustID result score above which the file CONFIRMS the tagged recording
@@ -31,30 +31,58 @@ def _acoustid_available() -> bool:
     return importlib.util.find_spec("acoustid") is not None
 
 
-IDCACHE = "gbc-acoustid-id-cache.json"   # path:mtime:size -> [rid, artist, title] | null. SHARED: verify writes
-                                         # each imposter's TRUE recording here so singletons reuses it (no re-FP).
+IDCACHE = "gbc-acoustid-id-cache.jsonl"        # one JSON object {path: entry} per line, APPEND-ONLY: a killed
+LEGACY_IDCACHE = "gbc-acoustid-id-cache.json"  # singletons walk resumes from the last line (no re-fingerprint) and
+                                               # never holds the whole cache in RAM. entry = [rid, artist, title,
+                                               # [all_ids]] | [rid, artist, title] (verify) | null. SHARED: verify
+                                               # writes each imposter's TRUE recording so singletons reuses it.
 
 
 def idcache_key(path) -> str | None:
-    try:
-        st = Path(path).stat()
-    except OSError:
-        return None
-    return f"{path}:{int(st.st_mtime)}:{st.st_size}"
+    # Key on the PATH alone (not mtime/size): re-tagging a file (mediafile.save) bumps its mtime+size but NOT its
+    # path, so a killed --apply run still finds the entry on relaunch -> cache HIT skips the slow re-fingerprint
+    # (the re-tag itself is cheap). A file re-encoded in place isn't part of this flow (convert touches clean only).
+    return str(path) if path else None
 
 
 def load_idcache(cfg: Config) -> dict:
-    try:
-        loaded = json.loads((cfg.beetsdir / IDCACHE).read_text(encoding="utf-8"))
-        return loaded if isinstance(loaded, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    """Replay the append-only JSONL into {path: entry} (last line wins), migrate the legacy single-blob JSON if
+    present, then COMPACT: drop entries whose file is gone (identified files get imported out of source/quarantine)
+    and rewrite one clean line each -- so the append log can't grow unbounded."""
+    cache: dict = {}
+    legacy = cfg.beetsdir / LEGACY_IDCACHE
+    with suppress(OSError, ValueError):
+        blob = json.loads(legacy.read_text(encoding="utf-8"))
+        if isinstance(blob, dict):
+            cache.update(blob)
+    with suppress(OSError):
+        for line in (cfg.beetsdir / IDCACHE).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                with suppress(ValueError):                  # tolerate a torn final line (process killed mid-append)
+                    cache.update(json.loads(line))
+    live = {k: v for k, v in cache.items() if Path(k).exists()}
+    if live != cache or legacy.exists():                    # compact the log + drop the migrated legacy blob
+        save_idcache(cfg, live)
+        legacy.unlink(missing_ok=True)
+    return live
 
 
 def save_idcache(cfg: Config, cache: dict) -> None:
-    # evict entries whose file is gone (identified files get imported out of source/quarantine) -> stays bounded
-    live = {k: v for k, v in cache.items() if Path(k.rsplit(":", 2)[0]).exists()}
-    write_json(cfg.beetsdir / IDCACHE, live)
+    # full atomic rewrite as compact JSONL, evicting entries whose file is gone -> stays bounded
+    live = {k: v for k, v in cache.items() if Path(k).exists()}
+    write_text(cfg.beetsdir / IDCACHE,
+               "".join(json.dumps({k: v}, ensure_ascii=False) + "\n" for k, v in live.items()))
+
+
+def append_idcache(cfg: Config, key: str, entry) -> None:
+    """Append ONE identity to the JSONL log immediately (+flush) so the singletons walk persists progress as it
+    goes: a kill resumes from the last line instead of re-fingerprinting from zero, and the walker never holds the
+    whole cache in RAM. A torn last line is tolerated by load_idcache; compaction also happens there."""
+    path = cfg.beetsdir / IDCACHE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({key: entry}, ensure_ascii=False) + "\n")
+        fh.flush()
 
 
 # generic tokens two UNRELATED artists routinely share -- never enough alone to call it "same artist":
@@ -157,8 +185,9 @@ def identify_dominant(path):
     return _dominant_from_results(results) if results is not None else None
 
 
-def run(cfg: Config, scope="") -> int:
-    """Flag imposter tracks among items in `scope` (whole library if empty). Returns the imposter count."""
+def run(cfg: Config, scope="", refresh: bool = False) -> int:
+    """Flag imposter tracks among items in `scope` (whole library if empty). Returns the imposter count.
+    `refresh` (a `gbc run --all`) re-pulls the MB tracklist cache instead of reusing the persisted one."""
     log = get_logger("verify")
     if not _acoustid_available():
         log.warning("pyacoustid not available -> fingerprint verification skipped")
@@ -234,7 +263,7 @@ def run(cfg: Config, scope="") -> int:
     save_idcache(cfg, idcache)                             # persist imposter identities for singletons to reuse
     log.info("=== fingerprint verify: %d check(s), %d imposter(s) quarantined, %d mismatch(es), %d inconclusive ===",
              checked, len(moved), mismatches, incon)
-    demoted = _demote_incomplete_albums(cfg, affected, log) if affected else 0
+    demoted = _demote_incomplete_albums(cfg, affected, log, refresh) if affected else 0
     if moved or demoted:
         prune_empty_dirs(cfg.clean)                            # remove album shells left empty by quarantine / demote
     if moved:
@@ -243,12 +272,12 @@ def run(cfg: Config, scope="") -> int:
     return len(moved)
 
 
-def _demote_incomplete_albums(cfg: Config, affected: dict, log) -> int:
+def _demote_incomplete_albums(cfg: Config, affected: dict, log, refresh: bool = False) -> int:
     """An album that just lost a track to imposter-quarantine may no longer be COMPLETE. Re-check each against
     its live MB tracklist; if recordings are now missing, re-file its surviving tracks as singletons under
     _Singles/ (the album library keeps only complete albums). Reversible: singletons `_promote_complete`
     re-assembles the album if the missing track is recovered later."""
-    rcache: dict = {}
+    rcache = load_release_cache(cfg, refresh)        # persisted MB tracklists, shared with singletons' promote
     demoted = 0
     for album_id, mb_albumid in affected.items():
         with skip_on_error(log, "verify", f"album_id:{album_id}"):
@@ -265,6 +294,7 @@ def _demote_incomplete_albums(cfg: Config, affected: dict, log) -> int:
                 demoted += 1
                 log.info("  DEMOTE incomplete album (missing %d MB track(s)) -> _Singles/: album_id:%s",
                          len(missing), album_id)
+    save_release_cache(cfg, rcache)                  # persist tracklists fetched this pass for the next run/pass
     if demoted:
         log.info("=== verify: %d incomplete album(s) demoted to singletons ===", demoted)
     return demoted

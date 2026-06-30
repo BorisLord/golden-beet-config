@@ -2,7 +2,7 @@
 # Install as a CLI:  uv tool install --editable .   ->  `gbc` on PATH (cron calls `gbc inbox`).
 [project]
 name = "golden-beets-config"
-version = "0.8.0"
+version = "0.9.0"
 description = "Opinionated, beets-driven pipeline that sorts and tags a music library into clean, complete albums and a separate singles collection, AcoustID/MusicBrainz-verified."
 license = "MIT"
 license-files = ["LICENSE"]

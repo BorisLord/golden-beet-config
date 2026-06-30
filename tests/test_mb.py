@@ -1,4 +1,7 @@
+import tempfile
+import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from gbc import mb
@@ -55,6 +58,36 @@ class TestMb(unittest.TestCase):
              mock.patch.object(mb.time, "sleep", lambda *a: None):
             self.assertEqual(mb.get("release/x"), {"ok": 1})
         self.assertEqual(calls["n"], 3)                              # two failures retried, third succeeded
+
+
+class TestReleaseCache(unittest.TestCase):
+    """The persisted MB tracklist cache shared by verify (demote) + singletons (promote)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = types.SimpleNamespace(beetsdir=Path(self._tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_roundtrips_as_frozensets(self):
+        mb.save_release_cache(self.cfg, {"a": frozenset({"r1", "r2"})})
+        self.assertEqual(mb.load_release_cache(self.cfg), {"a": frozenset({"r1", "r2"})})
+
+    def test_missing_file_loads_empty(self):
+        self.assertEqual(mb.load_release_cache(self.cfg), {})
+
+    def test_empty_tracklist_not_persisted(self):
+        # a fetch failure is cached as an empty frozenset WITHIN a run (no mid-run retry) but must NOT be written
+        # -> it gets retried next run instead of permanently poisoning the cache
+        mb.save_release_cache(self.cfg, {"a": frozenset({"r1"}), "bad": frozenset()})
+        loaded = mb.load_release_cache(self.cfg)
+        self.assertEqual(loaded, {"a": frozenset({"r1"})})
+        self.assertNotIn("bad", loaded)
+
+    def test_refresh_ignores_persisted(self):
+        mb.save_release_cache(self.cfg, {"a": frozenset({"r1"})})
+        self.assertEqual(mb.load_release_cache(self.cfg, refresh=True), {})   # `--all` re-pulls from MB
 
 
 if __name__ == "__main__":

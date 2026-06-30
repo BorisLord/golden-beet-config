@@ -37,19 +37,30 @@ def backup_db(cfg: Config, tag: str, log) -> None:
         log.info("backup %s -> %s", lib.name, dest.name)
 
 
-def write_json(path, obj) -> None:
-    """Atomically write `obj` as JSON to `path` (sibling tmp + os.replace), so a crash/ENOSPC mid-write can't
-    corrupt the file and silently discard a hard-won cache. Mirrors state.py's atomic progress/watermark write."""
+def _atomic_write(path, write_fn) -> None:
+    """Atomically write to `path` (sibling tmp + os.replace), so a crash/ENOSPC mid-write can't corrupt the file
+    and silently discard a hard-won cache. `write_fn(fh)` does the writing. Mirrors state.py's atomic write."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, ensure_ascii=False)
+            write_fn(fh)
         Path(tmp).replace(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def write_json(path, obj) -> None:
+    """Atomically write `obj` as JSON to `path`, STREAMED (json.dump to the handle) so a large cache isn't first
+    buffered into one big string in RAM."""
+    _atomic_write(path, lambda fh: json.dump(obj, fh, ensure_ascii=False))
+
+
+def write_text(path, text: str) -> None:
+    """Atomically write `text` to `path`. Used for the JSONL id-cache compaction rewrite."""
+    _atomic_write(path, lambda fh: fh.write(text))
 
 
 def length_secs(s: str) -> int:

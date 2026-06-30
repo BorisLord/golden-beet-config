@@ -4,9 +4,18 @@ import json
 import time
 import urllib.error
 import urllib.request
+from typing import TYPE_CHECKING
 
-_UA = "gbc/0.8 (golden-beets-config)"
+from .util import write_text
+
+if TYPE_CHECKING:
+    from .config import Config
+
+_UA = "gbc/0.9 (golden-beets-config)"
 _BASE = "https://musicbrainz.org/ws/2/"
+RELEASE_CACHE = "gbc-mb-release-cache.json"   # albumid -> recording ids. Persisted + SHARED by verify (demote
+                                              # incomplete) and singletons (promote complete) so the same MB
+                                              # release tracklist isn't re-fetched across passes/runs (cron-friendly).
 
 
 def get(path: str, retries: int = 4):
@@ -54,4 +63,26 @@ def missing_recordings(albumid: str, present_trackids, cache: dict | None = None
             cache[albumid] = official
     if not official:
         return None
+
     return official - frozenset(present_trackids)
+
+
+def load_release_cache(cfg: "Config", refresh: bool = False) -> dict:
+    """{albumid: frozenset(recording ids)} from disk -- the `cache` you hand to release_recordings /
+    missing_recordings. PERSISTED + SHARED by verify (demote) and singletons (promote) so the same MB tracklist
+    isn't re-fetched across passes/runs (cron-friendly). `refresh` (an --all / --reimport run) starts empty to
+    re-pull."""
+    if refresh:
+        return {}
+    try:
+        raw = json.loads((cfg.beetsdir / RELEASE_CACHE).read_text(encoding="utf-8"))
+        return {k: frozenset(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_release_cache(cfg: "Config", cache: dict) -> None:
+    # persist only SUCCESSFUL (non-empty) tracklists -> a transient MB 503 (cached as an empty frozenset within a
+    # run so it isn't retried mid-run) is NOT written, so it gets retried on the next run instead of poisoning it.
+    live = {k: sorted(v) for k, v in cache.items() if v}
+    write_text(cfg.beetsdir / RELEASE_CACHE, json.dumps(live, ensure_ascii=False))

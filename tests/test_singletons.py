@@ -144,12 +144,12 @@ class TestSingletons(Base):
         d.mkdir(parents=True, exist_ok=True)
         (d / "x.flac").write_bytes(b"x")
         calls = []
-        cache: dict = {}
         with mock.patch.object(verifymod, "_acoustid_available", lambda: True), \
              mock.patch.object(verifymod, "_lookup", lambda p: calls.append(p) or None):
-            singletons._fingerprint_retag(self.cfg, d, cache, set(), mock.MagicMock(), apply=False)
-            singletons._fingerprint_retag(self.cfg, d, cache, set(), mock.MagicMock(), apply=False)
-        self.assertEqual(len(calls), 1)           # 2nd run hits the cache -> AcoustID called only once
+            singletons._fingerprint_retag(self.cfg, d, {}, set(), mock.MagicMock(), apply=False)
+            resumed = verifymod.load_idcache(self.cfg)   # 2nd run RESUMES from the appended JSONL on disk
+            singletons._fingerprint_retag(self.cfg, d, resumed, set(), mock.MagicMock(), apply=False)
+        self.assertEqual(len(calls), 1)           # 2nd run hits the persisted cache -> AcoustID called only once
 
     # --- _promote_complete: robust completeness via the live MB tracklist ---
 
