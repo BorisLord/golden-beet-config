@@ -4,7 +4,7 @@ Turn a chaotic music library — tens of thousands of loose, mis-tagged files �
 for any player (Navidrome, Jellyfin, Plex, Subsonic/DLNA), then **keep it that way**: drop a new album or a
 loose track into the source and the cron imports, tags and files it for you. A documented [beets](https://beets.io)
 config for album-mode recovery, wrapped by a small Python CLI (`gbc`) that adds the orchestration a config can't
-express (dedup, sidecars, QA, format conversion, quality upgrades). Albums are matched by **AcoustID
+express (dedup, QA, format conversion, quality upgrades, singleton recovery). Albums are matched by **AcoustID
 fingerprint** + tags, so duplicate track numbers, download-batch folders and untitled rips don't matter — the
 folder structure is ignored.
 
@@ -89,9 +89,16 @@ gbc uninstall [--purge] remove the tooling (never your music)
 A killed multi-hour run resumes where it stopped (finished passes are skipped).
 
 **Source consumed vs preserved** is beets' `import.move`/`copy` decision (read from `beet config`): in **move**
-mode gbc also dedups the source, carries official sidecars into the album, and prunes empty shells; in
+mode gbc also dedups the source and prunes the emptied shells; in
 **copy/reflink/hardlink/symlink/in-place** mode the source is read-only and left untouched — it stays the
 curation backlog (`gbc singletons` dup-skips anything already in the clean library).
+Album extra files (booklet/scans/back art, `.cue`/`.log`, paired `.lrc`) are carried into the album natively by
+the **filetote** plugin during import — in both modes; fetchart owns the primary cover. gbc's job here is just the
+dedup + shell-prune that a config can't express.
+`gbc singletons` honours this too: it never rewrites a preserved source — **copy/reflink/hardlink** re-tag
+throwaway copies in a staging dir (source untouched), **symlink/in-place** skip source recovery (the library
+points at the original file). Before any *in-place* re-tag (move mode, or quarantined imposters) it first saves
+the original tags to `$BEETSDIR/gbc-singletons-retag-backup.jsonl`, so a rare wrong AcoustID match is reversible.
 
 ## Configuration
 

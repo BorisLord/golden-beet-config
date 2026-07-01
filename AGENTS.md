@@ -15,16 +15,17 @@ singletons stay in the source for manual curation.
 
 beets does art/genres/replaygain/scrub/ftintitle natively on import (`auto: yes`). gbc adds, per pass:
 **artfix** (strip mime=None WMA art pre-import so scrub can't crash), **upgrade** (a better dup-skipped source
-copy replaces a clean album), **albumdedup** (cross-source dup albums), **dedup**/**sidecars** (move-mode only),
+copy replaces a clean album), **albumdedup** (cross-source dup albums), **dedup** + source-shell prune (move-mode only),
 **convert** (WMA→Opus, WAV/AIFF/ALAC→FLAC, hi-res FLAC >48kHz/>16bit→16-bit/≤48kHz, before verify), **verify** (AcoustID imposter → quarantine),
 **acousticbrainz** (network BPM/key/mood), **qa** (audit + cull corrupt). beets via
 `beets.run_beet` (captures stdout+stderr; `--pretend` → stderr). `setup.sh` is the only bash.
 
-- **Move-vs-copy = beets' decision** (`beetscfg.py`). Source CONSUMED (move, copy+delete) → dedup/sidecars/prune
+- **Move-vs-copy = beets' decision** (`beetscfg.py`). Source CONSUMED (move, copy+delete) → dedup + shell-prune
   run. Source PRESERVED (copy/reflink/hardlink/symlink/in-place) → source READ-ONLY, those skipped; gbc never
-  mutates a preserved source (the source stays the curation backlog; `gbc singletons` dup-skips what's already clean).
+  mutates a preserved source (the curation backlog; `gbc singletons` dup-skips what's already clean). Album extras
+  (booklet/scans/`.lrc`/`.cue`/`.log`) ride along via the **filetote** plugin in BOTH modes; fetchart owns the cover.
 - **Quarantine** (`sidecars.quarantine_dir`): `<reason>/<Albumartist>/<Album (Year)>/…`. Reasons: `imposters`,
-  `duplicates`, `redundant-art`, `shells`, `converted`, `downsampled`, `corrupt`, `upgraded`. Good (`upgraded`,
+  `duplicates`, `shells`, `converted`, `downsampled`, `corrupt`, `upgraded`. Good (`upgraded`,
   `downsampled` = the hi-res masters) never mixes with bad.
 - **Logs:** one append-only `$LOG_DIR/gbc.log`, lines tagged `[pass]`+run-id; beets' decisions →
   `import-decisions.log`.
