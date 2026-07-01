@@ -110,17 +110,22 @@ def _lookup(path):
     unfingerprintable or the service stays unreachable after RETRIES. Single source of the AcoustID call so the
     imposter verdict AND the identity come from the same fingerprint (no double fingerprinting)."""
     import acoustid
-    for attempt in range(RETRIES):
+    try:                                            # fingerprint is deterministic + expensive -> do it ONCE
+        dur, fp = acoustid.fingerprint_file(path)
+    except acoustid.FingerprintGenerationError:
+        return None                                 # can't fingerprint -> inconclusive
+    except OSError:
+        return None                                 # file vanished/unreadable mid-run (TOCTOU) -> inconclusive
+    for attempt in range(RETRIES):                  # only the network lookup is retried
         try:
-            dur, fp = acoustid.fingerprint_file(path)
             resp = acoustid.lookup(APIKEY, fp, dur, meta="recordings")
-        except acoustid.FingerprintGenerationError:
-            return None                                 # can't fingerprint -> inconclusive
         except acoustid.WebServiceError:
-            time.sleep(2 ** attempt)
+            if attempt < RETRIES - 1:               # no point sleeping after the final attempt
+                time.sleep(2 ** attempt)
             continue
         if resp.get("status") != "ok":
-            time.sleep(2 ** attempt)
+            if attempt < RETRIES - 1:
+                time.sleep(2 ** attempt)
             continue
         return resp.get("results") or []
     return None
@@ -130,7 +135,7 @@ def _dominant_from_results(results):
     """The single CONFIDENT recording among AcoustID `results` -> (recording_mbid, artist, title), or None if
     AMBIGUOUS (several DIFFERENT songs match strongly) or nothing reaches MISMATCH_SCORE. Same audio on several
     releases (one song, many recording ids) is NOT ambiguous -- they share a title, so we keep the first."""
-    recs = [rec for r in results if (r.get("score") or 0) >= MISMATCH_SCORE
+    recs = [rec for r in (results or []) if (r.get("score") or 0) >= MISMATCH_SCORE
             for rec in (r.get("recordings") or []) if rec.get("id") and rec.get("title")]
     if not recs or len({(rec["title"] or "").strip().lower() for rec in recs}) != 1:
         return None
@@ -194,7 +199,7 @@ def run(cfg: Config, scope="", refresh: bool = False) -> int:
         return 0
     sc = [scope] if scope else []
     fmt = f"$id{SEP}$path{SEP}$mb_trackid{SEP}$artist{SEP}$title{SEP}$length{SEP}$bitrate{SEP}$album_id{SEP}$mb_albumid"
-    _, text = run_beet(cfg, ["ls", "-f", fmt, "mb_trackid::.", *sc], passname="verify", echo_lines=False)
+    _, text = run_beet(cfg, ["ls", "-f", fmt, "mb_trackid::.", *sc], passname="verify", echo_lines=False, check=True)
     rows = [ln.split(SEP, 8) for ln in text.splitlines() if ln.count(SEP) >= 8]
 
     cpath = cfg.beetsdir / "gbc-verify-cache.json"

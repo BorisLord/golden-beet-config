@@ -76,7 +76,7 @@ def run(cfg: Config, scope: str = "", apply: bool = False) -> int:
     flagged: dict[str, set[str]] = {}
     for field in JUNK_FIELDS:
         _, text = run_beet(cfg, ["ls", "-f", "$id", f"{field}::{combined}", *sc],
-                           passname="junk", echo_lines=False)
+                           passname="junk", echo_lines=False, check=True)
         for line in text.splitlines():
             if line.strip():
                 flagged.setdefault(line.strip(), set()).add(field)

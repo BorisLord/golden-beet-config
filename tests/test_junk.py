@@ -81,6 +81,22 @@ class TestJunk(Base):
             self.assertEqual(junk.run(self.cfg, apply=True), 0)
         self.assertFalse(any(a[0] == "modify" for a in captured))
 
+    def _checked_run_beet(self, rc):
+        """Fake run_beet honouring the real one's check= contract: the scope-detection query passes check=True,
+        so a nonzero rc must RAISE there (never return, which the pre-fix code mistook for an empty scope)."""
+        def fake(cfg, args, **k):
+            if k.get("check") and rc:
+                raise RuntimeError(f"beet {' '.join(map(str, args))!r} failed (rc={rc}, pass=junk)")
+            return (rc, "")
+        return fake
+
+    def test_failed_scope_query_raises_instead_of_returning_zero(self):
+        # scope `beet ls` query fails (rc=2) -> run must RAISE so the pipeline holds the watermark, not report 0
+        with mock.patch.object(junk, "run_beet", self._checked_run_beet(2)), \
+             mock.patch.object(junk, "backup_db", lambda *a, **k: None), \
+             self.assertRaises(RuntimeError):
+            junk.run(self.cfg, scope="added:2024-01..", apply=True)
+
 
 if __name__ == "__main__":
     unittest.main()

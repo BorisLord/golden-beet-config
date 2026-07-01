@@ -128,6 +128,74 @@ class TestAdminInit(Base):
         self.assertRegex(text, r"(?m)^\s*lastfm_key:\s*REPLACE_ME\s*$")      # empty key -> field placeholder kept
         self.assertRegex(text, r"(?m)^\s*fanarttv_key:\s*REPLACE_ME\s*$")    # absent key -> field placeholder kept
 
+    def test_init_treats_path_with_regex_backreference_literally(self):
+        """A clean/log path containing a regex backreference-like sequence (e.g. '\\g<0>') must be written
+        VERBATIM into config.yaml's `directory:`/`log:` lines. The fill uses a replacement FUNCTION, not a
+        replacement string -- so re.sub never interprets the value as a backref (old code: '\\g<0>' expanded
+        to the whole matched line; '\\1' raised re.error and aborted init)."""
+        weird_clean = self.tmp / r"cl\g<0>ean"
+        weird_logs = self.tmp / r"lo\g<0>gs"
+        self.cfg.clean = weird_clean
+        self.cfg.log_dir = weird_logs
+        cenv = self.tmp / "config.env"
+        cenv.write_text('MUSIC_CLEAN="${MUSIC_CLEAN:-/x}"\n')
+        with mock.patch.dict(os.environ, {"GBC_CONFIG": str(cenv)}):
+            self.assertEqual(admin.init(self.cfg, cron=False), 0)   # no re.error raised
+        text = (self.cfg.beetsdir / "config.yaml").read_text()
+        self.assertIn(f"directory: {weird_clean}", text)           # backref-like path kept literal
+        self.assertIn(f"log: {weird_logs}/import-decisions.log", text)
+
+
+class TestAdminUninstallPurge(Base):
+    """`uninstall --purge` may rmtree the beets config dir, but NEVER when doing so would reach into a music
+    dir (src/clean/dump). Overlap in EITHER direction (beetsdir is an ancestor of, or nested inside, a music
+    dir) must refuse the rmtree; a disjoint beetsdir is removed."""
+
+    def _cfg(self, beetsdir, clean):
+        return configmod.Config(beet="beet", beetsdir=beetsdir, src=self.tmp / "src",
+                                clean=clean, dump=self.tmp / "dump", log_dir=self.tmp / "logs")
+
+    def _uninstall(self, cfg):
+        # keep it hermetic: never touch the real crontab or the repo's config.env.
+        with mock.patch.object(admin.shutil, "which", lambda _n: None), \
+             mock.patch.object(admin, "config_path", lambda: None):
+            return admin.uninstall(cfg, purge=True)
+
+    def test_purge_refuses_when_beetsdir_is_parent_of_music(self):
+        # music nested UNDER beetsdir -> rmtree(beetsdir) would delete the music. Must refuse.
+        beetsdir = self.tmp / "beets"
+        clean = beetsdir / "music"
+        clean.mkdir(parents=True)
+        track = clean / "song.flac"
+        track.write_bytes(b"audio")
+        self._uninstall(self._cfg(beetsdir, clean))
+        self.assertTrue(track.exists())              # music survived the refused purge
+        self.assertTrue(beetsdir.is_dir())           # beetsdir NOT rmtree'd
+
+    def test_purge_refuses_when_beetsdir_inside_music(self):
+        # beetsdir nested INSIDE clean -> rmtree(beetsdir) carves a hole out of the music tree. Must refuse.
+        clean = self.tmp / "clean"
+        beetsdir = clean / "catalog"
+        beetsdir.mkdir(parents=True)
+        marker = beetsdir / "library.db"
+        marker.write_bytes(b"db")
+        self._uninstall(self._cfg(beetsdir, clean))
+        self.assertTrue(marker.exists())             # beetsdir (inside music) left intact
+        self.assertTrue(clean.is_dir())
+
+    def test_purge_removes_disjoint_beetsdir(self):
+        # beetsdir disjoint from every music dir -> safe to remove; music untouched.
+        beetsdir = self.tmp / "beets"
+        clean = self.tmp / "clean"
+        beetsdir.mkdir(parents=True)
+        (beetsdir / "library.db").write_bytes(b"db")
+        clean.mkdir(parents=True)
+        track = clean / "song.flac"
+        track.write_bytes(b"audio")
+        self._uninstall(self._cfg(beetsdir, clean))
+        self.assertFalse(beetsdir.exists())          # disjoint config dir removed
+        self.assertTrue(track.exists())              # music untouched
+
 
 if __name__ == "__main__":
     unittest.main()

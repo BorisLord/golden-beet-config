@@ -16,9 +16,12 @@ _HEARTBEAT_S = 60       # beet is silent during long file-write/replaygain phase
 
 
 def run_beet(cfg: Config, args, *, overlay: str | None = None, passname: str,
-             echo_lines: bool = True, merge_stderr: bool = True) -> tuple[int, str]:
+             echo_lines: bool = True, merge_stderr: bool = True, check: bool = False) -> tuple[int, str]:
     """Run `beet [-c overlay] <args...>` -> (returncode, merged_output_text).
-    echo_lines=False captures silently (for `ls`/counts/queries we parse rather than dump to the log)."""
+    echo_lines=False captures silently (for `ls`/counts/queries we parse rather than dump to the log).
+    check=True RAISES RuntimeError on a nonzero exit -- use it for the scope query a post-import pass builds its
+    work from: a failed scope query must abort the pass (so the pipeline HOLDS the watermark) rather than look
+    like an empty scope and let the window be silently skipped."""
     log = get_logger(passname)
     cmd = [cfg.beet]
     if overlay:
@@ -60,4 +63,6 @@ def run_beet(cfg: Config, args, *, overlay: str | None = None, passname: str,
         raise RuntimeError(f"beet not found ({cfg.beet!r}) -- install beets or run ./setup.sh") from e
     finally:
         stop.set()
+    if check and proc.returncode:
+        raise RuntimeError(f"beet {' '.join(str(a) for a in args)!r} failed (rc={proc.returncode}, pass={passname})")
     return proc.returncode, "\n".join(lines)

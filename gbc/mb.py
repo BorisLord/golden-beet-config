@@ -33,7 +33,8 @@ def get(path: str, retries: int = 4):
             last = e
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             last = e
-        time.sleep(2 ** attempt)
+        if attempt < retries - 1:                   # don't sleep after the final attempt -> raise immediately
+            time.sleep(2 ** attempt)
     raise last
 
 

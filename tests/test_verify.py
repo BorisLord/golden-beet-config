@@ -304,5 +304,35 @@ class TestVerify(Base):
         self.assertIn(["mbDen", "Den Harrow", "OtherSong"], list(idcache.values()))
 
 
+class TestLookupResilience(unittest.TestCase):
+    """_lookup swallows an OSError from fingerprinting (file vanished/unreadable mid-run, TOCTOU) and returns
+    None = inconclusive; _file_verdict then reports status 'error' WITHOUT raising, so one bad file never
+    aborts the whole pass. Skipped when pyacoustid is absent (nothing to patch)."""
+
+    @unittest.skipUnless(verify._acoustid_available(), "pyacoustid not installed")
+    def test_lookup_returns_none_on_oserror(self):
+        import acoustid
+        with mock.patch.object(acoustid, "fingerprint_file", side_effect=OSError("gone")):
+            self.assertIsNone(verify._lookup("/nope.flac"))
+
+    @unittest.skipUnless(verify._acoustid_available(), "pyacoustid not installed")
+    def test_file_verdict_error_status_on_oserror(self):
+        import acoustid
+        with mock.patch.object(acoustid, "fingerprint_file", side_effect=OSError("gone")):
+            status, present, mismatch, dominant = verify._file_verdict("/nope.flac", "mbTagged")
+        self.assertEqual((status, present, mismatch, dominant), ("error", False, None, None))
+
+
+class TestDominantFromResults(unittest.TestCase):
+    """_dominant_from_results must tolerate the inconclusive sentinels _lookup returns -- None (service down /
+    unfingerprintable) and [] (answered but no results) -> None, never a crash on `for r in None`."""
+
+    def test_none_results_returns_none(self):
+        self.assertIsNone(verify._dominant_from_results(None))
+
+    def test_empty_results_returns_none(self):
+        self.assertIsNone(verify._dominant_from_results([]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,8 +8,9 @@
 https?://\S+
 www\.\S+
 
-# --- bare rip/leak-site domains (no scheme): rnbxclusive.se, sinmasmp3.tk, soulection.com, collection.by.ru ---
-\b[\w-]{2,}\.(com|net|org|info|biz|se|ru|tk|cc|to|me|us)\b
+# --- bare rip/leak-site domains (no scheme): rnbxclusive.se, sinmasmp3.tk, soulection.com. Word-like TLDs
+#     (to/me/us/cc) dropped -- they'd excise legit free text like "back.to"; scheme URLs still catch those. ---
+\b[\w-]{2,}\.(com|net|org|info|biz|se|ru|tk)\b
 
 # --- rip / encode signatures (greedy to end-of-line: the whole "ripped/encoded by X" phrase is junk) ---
 \bripped\s+(by|from)\b.*

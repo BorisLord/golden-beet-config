@@ -102,8 +102,12 @@ def run(cfg: Config, apply: bool = False) -> int:
                     continue
                 run_beet(cfg, ["remove", "-a", "-f", _albumid_q(albumid)],
                          passname="restore-imposters", echo_lines=False)
-                run_beet(cfg, ["-c", str(noplugins), "import", "-q", "-I", "-A", "--flat", str(clean_dir)],
-                         passname="restore-imposters")
+                rc, _ = run_beet(cfg, ["-c", str(noplugins), "import", "-q", "-I", "-A", "--flat", str(clean_dir)],
+                                 passname="restore-imposters")
+                if rc:                                        # files are already in clean_dir (survive), but no rows
+                    log.error("restore-imposters: re-import rc=%d for %s -- files back in clean, lib rows may be "
+                              "missing (re-run `gbc run` to re-index)", rc, label)
+                    continue                                  # don't count/normalise a failed import as restored
                 if was_comp:                                  # re-apply the lost comp normalisation + re-route
                     run_beet(cfg, ["modify", "-a", "-y", _albumid_q(albumid), "comp=1"],
                              passname="restore-imposters", echo_lines=False)
@@ -117,8 +121,12 @@ def run(cfg: Config, apply: bool = False) -> int:
                 moved = [p for p in audio if safe_move(p, unique_dest(staging, Path(p).name), log)]
                 if not moved:
                     continue
-                run_beet(cfg, ["-c", str(noplugins), "import", "-q", "-I", "-A", "--flat", str(staging)],
-                         passname="restore-imposters")
+                rc, _ = run_beet(cfg, ["-c", str(noplugins), "import", "-q", "-I", "-A", "--flat", str(staging)],
+                                 passname="restore-imposters")
+                if rc:                                        # import failed -> files sit in staging, NOT in clean
+                    log.error("restore-imposters: import rc=%d for %s -- %d file(s) left in %s for manual recovery "
+                              "(NOT restored, NOT deleted)", rc, label, len(moved), staging)
+                    continue                                  # leave staging intact; don't count as restored
                 with suppress(OSError):
                     staging.rmdir()
                     staging.parent.rmdir()

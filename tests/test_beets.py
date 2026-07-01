@@ -45,6 +45,21 @@ class TestBeetsRunner(Base):
         self.assertIn("import -q", text)
         self.assertIn(f"BEETSDIR {self.cfg.beetsdir}", text)
 
+    def test_check_true_raises_on_nonzero_exit(self):
+        # a failed scope query must ABORT the pass (so the pipeline HOLDS the watermark) rather than look like
+        # an empty scope; check=True turns a nonzero exit into a RuntimeError
+        self.cfg.beet = self.fake_beet(stderr="query blew up\n", code=2)
+        with self.assertRaises(RuntimeError) as ctx:
+            run_beet(self.cfg, ["ls", "-f", "$id", "bogus::query"], passname="test", echo_lines=False, check=True)
+        self.assertIn("rc=2", str(ctx.exception))     # the real nonzero code is surfaced in the abort message
+
+    def test_check_true_does_not_raise_on_success(self):
+        # check=True aborts ONLY on failure -- a clean rc=0 run still returns (rc, text) normally
+        self.cfg.beet = self.fake_beet(stdout="ok line\n", code=0)
+        rc, text = run_beet(self.cfg, ["ls"], passname="test", echo_lines=False, check=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("ok line", text)
+
 
 if __name__ == "__main__":
     unittest.main()

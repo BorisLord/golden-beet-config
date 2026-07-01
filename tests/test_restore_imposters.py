@@ -74,6 +74,24 @@ class TestRestoreImposters(Base):
         self.assertTrue(any(a[0] == "modify" and "comp=1" in a for a in beet))   # comp re-applied
         self.assertTrue(any(a[0] == "move" for a in beet))                       # re-routed
 
+    def test_apply_whole_album_failed_import_keeps_files_uncounted(self):
+        # Whole-album branch (_clean_album_dir None): a failed import (rc=2) must NOT count the album and must
+        # leave the moved files in the .gbc-restore/<albumid> staging dir for manual recovery (never lost).
+        src_dir = self._quarantine_album("Artist", "Album (2001)", ["01.mp3", "02.mp3"])
+        beet = []
+        with mock.patch.object(restore_imposters, "_read_albumid", lambda a: ("albID", "Album")), \
+             mock.patch.object(restore_imposters, "_clean_album_dir", lambda c, i: None), \
+             mock.patch.object(restore_imposters, "run_beet", lambda c, a, **k: beet.append(a) or (2, "")), \
+             mock.patch.object(restore_imposters, "backup_db", lambda *a, **k: None), \
+             mock.patch.object(restore_imposters, "prune_empty_dirs", lambda *a, **k: None):
+            n = restore_imposters.run(self.cfg, apply=True)
+        self.assertEqual(n, 0)                                       # failed import -> NOT counted as restored
+        self.assertTrue(any("import" in a for a in beet))            # import WAS attempted
+        staging = self.cfg.beetsdir / ".gbc-restore" / "albID"
+        left = sorted(p.name for p in staging.iterdir())
+        self.assertEqual(left, ["01.mp3", "02.mp3"])                 # files preserved in staging, not lost
+        self.assertFalse((src_dir / "01.mp3").exists())              # moved out of quarantine into staging
+
 
 if __name__ == "__main__":
     unittest.main()

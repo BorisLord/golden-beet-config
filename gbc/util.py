@@ -39,7 +39,8 @@ def backup_db(cfg: Config, tag: str, log) -> None:
 
 def _atomic_write(path, write_fn) -> None:
     """Atomically write to `path` (sibling tmp + os.replace), so a crash/ENOSPC mid-write can't corrupt the file
-    and silently discard a hard-won cache. `write_fn(fh)` does the writing. Mirrors state.py's atomic write."""
+    and silently discard a hard-won cache. `write_fn(fh)` does the writing. The single atomic-write primitive
+    (state.py's watermark/progress writers go through write_json -> here too)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")

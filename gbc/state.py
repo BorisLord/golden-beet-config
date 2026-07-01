@@ -6,6 +6,7 @@ import re-walk).
 import json
 
 from .config import Config
+from .util import write_json
 
 
 def _path(cfg: Config):
@@ -22,17 +23,14 @@ def get_progress(cfg: Config) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        d = json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return {}
+    return d if isinstance(d, dict) else {}          # a corrupted non-dict (e.g. `[]`/`42`) -> start fresh
 
 
 def set_progress(cfg: Config, data: dict) -> None:
-    p = _progress_path(cfg)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")                 # write+rename: a kill mid-write can't truncate progress
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(p)
+    write_json(_progress_path(cfg), data)              # atomic tmp+replace: a kill mid-write can't truncate it
 
 
 def clear_progress(cfg: Config) -> None:
@@ -44,17 +42,14 @@ def get_watermark(cfg: Config) -> str | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8")).get("last_run")
+        d = json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return None
+    return d.get("last_run") if isinstance(d, dict) else None
 
 
 def set_watermark(cfg: Config, iso_ts: str) -> None:
-    p = _path(cfg)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")                 # write+rename: a kill mid-write can't truncate state
-    tmp.write_text(json.dumps({"last_run": iso_ts}), encoding="utf-8")
-    tmp.replace(p)
+    write_json(_path(cfg), {"last_run": iso_ts})       # atomic tmp+replace: a kill mid-write can't truncate it
 
 
 def added_query(watermark: str | None) -> str:

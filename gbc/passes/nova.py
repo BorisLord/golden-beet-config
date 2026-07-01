@@ -47,10 +47,10 @@ def _build_cache(cfg: Config, log) -> dict:
         tracks = [t for m in mb.get(f"release/{albumid}?inc=recordings&fmt=json").get("media", [])
                   for t in m.get("tracks", [])]
         time.sleep(1.1)
-        for t in tracks:
-            rec = t.get("recording", {})
+        for n, t in enumerate(tracks, 1):        # absolute position over flattened media -> no per-disc collision
+            rec = t.get("recording", {})         # (MB `position` resets each disc; `total` is the grand total)
             if rec.get("id"):
-                cache[rec["id"]] = {"compil": compil, "track": t.get("position"),
+                cache[rec["id"]] = {"compil": compil, "track": n,
                                     "total": len(tracks), "albumid": albumid}
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     write_json(cfg.beetsdir / CACHE, cache)                # atomic (tmp + replace): a crash can't corrupt the cache

@@ -14,7 +14,8 @@ sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of c
 case "$sr" in
     88200|176400|352800) tsr=44100 ;;   # 44.1 kHz family -> integer-ratio decimation (4:1 / 2:1)
     96000|192000|384000) tsr=48000 ;;   # 48 kHz family   -> integer-ratio decimation
-    *) tsr="${sr:-44100}" ;;            # already <=48k (or unreadable): keep the rate, only drop depth to 16-bit
+    *) if [ "${sr:-0}" -gt 48000 ]; then tsr=48000;   # non-standard hi-res rate -> clamp to 48k (else never converges)
+       else tsr="${sr:-44100}"; fi ;;                 # already <=48k (or unreadable): keep rate, only drop depth to 16-bit
 esac
 # -vn + -map_metadata -1: drop any source cover stream + container tags; beets re-tags + re-embeds art after
 # keep_new. soxr VHQ (precision 28) + TPDF dither (triangular_hp; ffmpeg's default is the weaker rectangular)

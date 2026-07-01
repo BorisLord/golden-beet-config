@@ -89,8 +89,10 @@ def _warn_missing_plugins(config_text: str, log) -> None:
 def read_import(cfg: Config) -> BeetsImport:
     """`beet config` (resolved) -> the effective import op; warns if a plugin gbc depends on is absent."""
     log = get_logger("beetscfg")
-    # merge_stderr=False: beet's stderr warnings would corrupt the YAML we parse
-    _, text = run_beet(cfg, ["config"], passname="beetscfg", echo_lines=False, merge_stderr=False)
+    # merge_stderr=False: beet's stderr warnings would corrupt the YAML we parse. check=True: a failed
+    # `beet config` leaves the move-vs-copy op UNKNOWN -- abort rather than derive a wrong "preserved" and
+    # skip dedup/prune while the real import still consumes the source (orphaned shells).
+    _, text = run_beet(cfg, ["config"], passname="beetscfg", echo_lines=False, merge_stderr=False, check=True)
     _warn_missing_plugins(text, log)
     bi = parse_import(text)
     log.info("beets import op = %s (source %s)", bi.label,

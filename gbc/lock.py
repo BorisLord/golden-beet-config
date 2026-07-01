@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from filelock import FileLock, Timeout
 
 from .config import Config
+from .logs import get_logger
 
 
 @contextmanager
@@ -12,10 +13,13 @@ def import_lock(cfg: Config, *, blocking: bool = True):
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(cfg.beetsdir / ".import.lock"))
     try:
-        lock.acquire(timeout=-1 if blocking else 0)
+        lock.acquire(timeout=0)                        # fast path: acquire immediately if free
     except Timeout:
-        yield False
-        return
+        if not blocking:                               # cron door -> bow out, another run holds it
+            yield False
+            return
+        get_logger("lock").info("waiting for the import lock (another gbc run is active)...")
+        lock.acquire(timeout=-1)                        # then block until the holder releases
     try:
         yield True
     finally:

@@ -1,6 +1,7 @@
 import unittest
 
-from gbc.beetscfg import BeetsImport, parse_import
+from gbc.beetscfg import BeetsImport, parse_import, read_import
+from tests.base import Base
 
 
 class TestBeetsImport(unittest.TestCase):
@@ -62,6 +63,24 @@ class TestParseImport(unittest.TestCase):
 
     def test_garbage_is_safe(self):
         self.assertIsInstance(parse_import(":::not: yaml: ["), BeetsImport)
+
+
+class TestReadImport(Base):
+    """`read_import` runs `beet config` with check=True: a FAILED config read leaves the move-vs-copy op
+    unknown, so it must ABORT (RuntimeError) rather than silently return a default 'preserved' BeetsImport
+    that would skip dedup/prune while the real import still consumes the source."""
+
+    def test_beet_config_failure_raises_runtimeerror(self):
+        self.cfg.beet = self.fake_beet(stdout="import:\n  move: yes\n", code=2)   # nonzero exit
+        with self.assertRaises(RuntimeError):
+            read_import(self.cfg)
+
+    def test_beet_config_success_returns_parsed_import(self):
+        self.cfg.beet = self.fake_beet(stdout="import:\n  move: yes\n", code=0)
+        bi = read_import(self.cfg)
+        self.assertIsInstance(bi, BeetsImport)
+        self.assertTrue(bi.move)                    # parsed from the fake `beet config` YAML
+        self.assertTrue(bi.source_consumed)
 
 
 if __name__ == "__main__":

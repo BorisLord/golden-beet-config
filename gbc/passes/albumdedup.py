@@ -27,7 +27,7 @@ _NUMWORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "si
 
 def _match(durs_a, durs_b) -> bool:
     """Same count + every (sorted) track within TOL -> same album, tolerant to a different rip."""
-    return len(durs_a) == len(durs_b) and all(
+    return bool(durs_a) and len(durs_a) == len(durs_b) and all(   # two empty lists are NOT "the same album"
         abs(x - y) <= TOL for x, y in zip(sorted(durs_a), sorted(durs_b), strict=True))
 
 
@@ -67,13 +67,15 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
             continue
         aid, albumartist, album, year, length, bitrate, mb, path = p[:8]
         a = albums.setdefault(aid, {"artist": albumartist, "album": album, "year": year, "mb": mb,
-                                    "durs": [], "br": 0, "exts": Counter(), "folder": Path(path).parent})
+                                    "durs": [], "brs": [], "exts": Counter(), "folder": Path(path).parent})
         a["durs"].append(length_secs(length))
         a["exts"][Path(path).suffix.lower()] += 1
         digits = re.sub(r"\D", "", bitrate)
-        a["br"] = max(a["br"], int(digits) if digits else 0)
+        if digits:
+            a["brs"].append(int(digits))
     for a in albums.values():                      # format tier + codec-normalised bitrate, for the keeper choice
         ext = a["exts"].most_common(1)[0][0] if a["exts"] else ""
+        a["br"] = round(sum(a["brs"]) / len(a["brs"])) if a["brs"] else 0   # mean per-item bitrate (matches upgrade)
         a["rank"], a["ebr"] = rank(ext), eff(ext, a["br"])
 
     # bucket by (artist, track count), cluster by TOLERANT duration match -- an exact multiset misses the

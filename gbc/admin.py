@@ -18,6 +18,12 @@ _HOME = Path.home()
 CRON_PATH = f"{_HOME}/.local/bin:{_HOME}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
 
 
+def _entangled(a: Path, b: Path) -> bool:
+    """True if a == b or either is an ancestor of the other -- rmtree(a) would then reach into b."""
+    a, b = a.resolve(), b.resolve()
+    return a == b or a in b.parents or b in a.parents
+
+
 def init(cfg: Config, cron: bool = False) -> int:
     log = get_logger("init")
     example = REPO_ROOT / "config.env.example"
@@ -34,13 +40,14 @@ def init(cfg: Config, cron: bool = False) -> int:
     for d in (cfg.beetsdir, cfg.src, cfg.clean, cfg.dump, cfg.log_dir):
         d.mkdir(parents=True, exist_ok=True)
 
+    keys = read_api_keys()                       # Discogs/last.fm/fanart.tv tokens from config.env -- read ONCE
+
     for y in sorted((REPO_ROOT / "beets").glob("*.yaml")):
         text = y.read_text(encoding="utf-8")
         text = text.replace("@HELPERS@", str(REPO_ROOT / "helpers"))   # convert.yaml's wma2opus wrapper path
         if y.name == "config.yaml":
-            text = re.sub(r"(?m)^directory:.*$", f"directory: {cfg.clean}", text)
-            text = re.sub(r"(?m)^  log:.*$", f"  log: {cfg.log_dir}/import-decisions.log", text)
-            keys = read_api_keys()                     # fill the API keys set in config.env (Discogs/last.fm/fanart.tv)
+            text = re.sub(r"(?m)^directory:.*$", lambda m: f"directory: {cfg.clean}", text)
+            text = re.sub(r"(?m)^  log:.*$", lambda m: f"  log: {cfg.log_dir}/import-decisions.log", text)
             for field, val in keys.items():            # line-anchored: only the field assignment, not a comment
                 text = re.sub(rf"(?m)^(\s*{re.escape(field)}:\s*)REPLACE_ME\s*$",
                               r"\g<1>" + val.replace("\\", r"\\"), text)
@@ -52,7 +59,7 @@ def init(cfg: Config, cron: bool = False) -> int:
             dest.chmod(0o600)                      # O_CREAT mode is ignored if the file pre-existed -> enforce it
         else:
             dest.write_text(text, encoding="utf-8")
-    nkeys = len(read_api_keys())
+    nkeys = len(keys)
     log.info("deployed beets/*.yaml -> %s (directory + import log%s filled)",
              cfg.beetsdir, f" + {nkeys} API key(s)" if nkeys else "")
     if nkeys < len(API_KEYS):
@@ -100,17 +107,26 @@ def uninstall(cfg: Config, purge: bool = False) -> int:
                 log.info("removed cron entry")
     if purge:
         bd, home = cfg.beetsdir.resolve(), Path.home().resolve()
+        music = (cfg.src, cfg.clean, cfg.dump)
         if bd == Path("/") or bd == home or bd in home.parents:   # refuse root/home/ancestor-of-home
             log.warning("refusing --purge: %s is root/home or an ancestor of home", bd)
+        elif any(_entangled(bd, m) for m in music):               # refuse if it would reach into any music dir
+            log.warning("refusing --purge: %s overlaps a music dir (src/clean/dump) -- music never deleted", bd)
         else:
             shutil.rmtree(bd, ignore_errors=True)
-            log.info("removed beets config dir + catalog (%s)", bd)
+            if bd.exists():
+                log.warning("purge: %s not fully removed -- some files remain", bd)
+            else:
+                log.info("removed beets config dir + catalog (%s)", bd)
     cenv = config_path()
     if cenv and cenv.exists():
         cenv.unlink()
         log.info("removed %s", cenv)
     if cfg.log_dir.exists():
         shutil.rmtree(cfg.log_dir, ignore_errors=True)
-        log.info("removed logs (%s)", cfg.log_dir)
+        if cfg.log_dir.exists():
+            log.warning("logs (%s) not fully removed -- some files remain", cfg.log_dir)
+        else:
+            log.info("removed logs (%s)", cfg.log_dir)
     log.info("done. Your music is untouched: %s | %s | %s", cfg.src, cfg.clean, cfg.dump)
     return 0

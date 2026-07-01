@@ -182,6 +182,19 @@ class TestRun(Base):
         self.assertIn(MB_A, applied)
 
 
+class TestRunWatermarkHold(Base):
+    """A failed scope query must ABORT the pass (RuntimeError) so the pipeline HOLDS the watermark, rather than
+    look like an empty scope (return 0) and let the un-enriched window be silently skipped."""
+
+    def test_failed_scope_query_raises_instead_of_returning_zero(self):
+        def fake_run_beet(cfg, args, **k):
+            if k.get("check"):                        # the scope query -- real run_beet RAISES here on rc=2
+                raise RuntimeError("beet 'ls ...' failed (rc=2, pass=acousticbrainz)")
+            return 0, ""
+        with mock.patch.object(ab, "run_beet", fake_run_beet), self.assertRaises(RuntimeError):
+            ab.run(self.cfg, scope="added:2024-01..")
+
+
 _FFMPEG = shutil.which("ffmpeg")
 
 

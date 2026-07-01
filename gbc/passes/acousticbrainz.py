@@ -201,7 +201,7 @@ def run(cfg: Config, scope: str = "") -> int:
     # Capture mbid->paths UP FRONT: a re-query after applying would miss files when scope filters on bpm
     # (writing bpm empties such a scope -> 0 files tagged). One row per (recording, album) -> several paths.
     _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
-                       passname="acousticbrainz", echo_lines=False)
+                       passname="acousticbrainz", echo_lines=False, check=True)
     paths_by_mbid: dict = {}
     for ln in text.splitlines():
         mb, _, path = ln.partition("\t")

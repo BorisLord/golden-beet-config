@@ -77,6 +77,35 @@ class TestNova(Base):
         with mock.patch.object(nova, "_build_cache", mock.Mock(side_effect=OSError("no net"))):
             self.assertEqual(nova.run(self.cfg, refresh=True), 1)
 
+    def test_build_cache_numbers_tracks_absolutely_across_discs(self):
+        """A multi-disc (box-less) release has MB `position` RESET per disc (disc2 tracks are 1,2,3 again).
+        _build_cache must assign UNIQUE absolute track numbers over the FLATTENED media (1..N), never the
+        per-disc position -- otherwise disc1 t1 and disc2 t1 collide and later tracks overwrite earlier cache
+        entries."""
+        def fake_mb(path):
+            if "series/" in path:
+                return {"relations": [{"release_group": {"id": "rgm", "title": "Nova Tunes 42"}}]}
+            if path.startswith("release?release-group="):
+                return {"releases": [{"id": "relm"}]}
+            if path.startswith("release/relm"):
+                return {"media": [
+                    {"tracks": [{"position": 1, "recording": {"id": "d1a"}},
+                                {"position": 2, "recording": {"id": "d1b"}},
+                                {"position": 3, "recording": {"id": "d1c"}}]},
+                    {"tracks": [{"position": 1, "recording": {"id": "d2a"}},   # position RESETS on disc 2
+                                {"position": 2, "recording": {"id": "d2b"}}]},
+                ]}
+            return {}
+
+        with mock.patch.object(nova.mb, "get", fake_mb), \
+             mock.patch.object(nova.time, "sleep", lambda *a: None):
+            cache = nova._build_cache(self.cfg, mock.MagicMock())
+        self.assertEqual(len(cache), 5)                                        # no entry overwritten
+        tracks = {rid: e["track"] for rid, e in cache.items()}
+        self.assertEqual(tracks, {"d1a": 1, "d1b": 2, "d1c": 3, "d2a": 4, "d2b": 5})
+        self.assertEqual(sorted(e["track"] for e in cache.values()), [1, 2, 3, 4, 5])  # full 1..N, no collision
+        self.assertTrue(all(e["total"] == 5 for e in cache.values()))         # grand total, not per-disc
+
 
 if __name__ == "__main__":
     unittest.main()
