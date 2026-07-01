@@ -1,71 +1,12 @@
-import json
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from gbc import probe, sidecars
+from gbc import sidecars
 from tests.base import Base
 
 
-def _fake_dur(p):
-    # "NN - ...": NN*10 seconds; non-numeric basenames -> 0
-    name = Path(p).name
-    return int(name[:2]) * 10 if name[:2].isdigit() else 0
-
-
-def _get(self, p):
-    # a ProbeCache.get whose length follows the filename (snapshot only consumes pr.length)
-    return probe.Probe(title="", length=_fake_dur(p), bitrate=0,
-                       ext=Path(p).suffix.lower(), artist="", album="", year="")
-
-
 class TestSidecars(Base):
-    def test_snapshot_picks_official_sidecars_only(self):
-        alb = self.tmp / "src" / "My Album (2020)"
-        alb.mkdir(parents=True)
-        for i in (1, 2, 3):
-            (alb / f"{i:02d} - song.flac").write_text("x")
-        (alb / "cover.jpg").write_text("c")
-        (alb / "booklet.pdf").write_text("b")
-        (alb / "01 - song.lrc").write_text("lrc")
-        (alb / "notes.txt").write_text("n")           # NOT an official sidecar
-        snapf = self.tmp / "snap.json"
-        with mock.patch.object(probe.ProbeCache, "get", _get):
-            self.assertEqual(sidecars.snapshot(str(self.tmp / "src"), str(snapf)), 1)
-        snap = json.loads(snapf.read_text())[0]
-        self.assertEqual(snap["durs"], [10, 20, 30])
-        self.assertEqual({Path(f).name for f in snap["files"]}, {"cover.jpg", "booklet.pdf", "01 - song.lrc"})
-
-    def test_apply_carries_quarantines_and_skips_stale(self):
-        alb = self.tmp / "src" / "My Album (2020)"
-        alb.mkdir(parents=True)
-        for i in (1, 2, 3):
-            (alb / f"{i:02d} - s.flac").write_text("x")
-        (alb / "cover.jpg").write_text("c")
-        (alb / "booklet.pdf").write_text("b")
-        (alb / "01 - s.lrc").write_text("l")
-        snapf = self.tmp / "snap.json"
-        with mock.patch.object(probe.ProbeCache, "get", _get):
-            sidecars.snapshot(str(self.tmp / "src"), str(snapf))
-
-        clean = self.tmp / "clean" / "Artist" / "My Album (2020)"
-        clean.mkdir(parents=True)
-        for i in (1, 2, 3):
-            (clean / f"{i:02d} - s.flac").write_text("x")
-        (clean / "cover.jpg").write_text("existing")          # clean already has a cover
-        # clean items are read NATIVELY now: build the `beet ls -f '$path\t$length'` output (M:SS) + a stale dir
-        ls_lines = [f"{clean / f'{i:02d} - s.flac'}\t{sec // 60}:{sec % 60:02d}"
-                    for i, sec in zip((1, 2, 3), (10, 20, 30), strict=True)]
-        ls_lines.append(f"{self.tmp / 'gone' / 'x.flac'}\t1:39")          # 99s, stale db dir (clean dir gone)
-        with mock.patch.object(sidecars, "run_beet", lambda cfg, a, **k: (0, "\n".join(ls_lines))):
-            sidecars.apply(self.cfg, str(snapf), str(self.tmp / "dump"), True)
-
-        self.assertTrue((clean / "booklet.pdf").exists())          # booklet carried into clean
-        self.assertFalse((alb / "booklet.pdf").exists())
-        self.assertTrue((clean / "01 - s.lrc").exists())           # lyrics carried into clean
-        self.assertTrue((self.tmp / "dump" / "redundant-art" / "Artist" / "My Album (2020)" / "cover.jpg").exists())
-        self.assertEqual((clean / "cover.jpg").read_text(), "existing")                  # clean cover untouched
-
     def test_prune_shells_merges_into_one_folder(self):
         shell = self.tmp / "src" / "Alb"
         shell.mkdir(parents=True)
@@ -130,6 +71,26 @@ class TestSidecars(Base):
         self.assertTrue(ok)
         self.assertTrue((self.tmp / "b.txt").exists())
         self.assertFalse(src.exists())
+
+    def test_prune_shells_failed_child_move_keeps_shell_uncounted(self):
+        # A shell where ONE child fails to move: the shell is only PARTIALLY cleared, so it must NOT be counted
+        # and its source dir must be KEPT (never rmdir'd over files still inside) -- no phantom "quarantined".
+        shell = self.tmp / "src" / "Alb"
+        shell.mkdir(parents=True)
+        (shell / "a.jpg").write_text("a")
+        (shell / "b.jpg").write_text("b")
+        real_move = sidecars.safe_move
+
+        def flaky_move(src, dst, log):
+            if Path(src).name == "b.jpg":
+                return False                                 # simulate one child that won't move
+            return real_move(src, dst, log)
+
+        with mock.patch.object(sidecars, "safe_move", flaky_move):
+            n = sidecars.prune_shells(str(self.tmp / "src"), str(self.tmp / "dump"), True)
+        self.assertEqual(n, 0)                               # partial move -> NOT counted as quarantined
+        self.assertTrue(shell.is_dir())                      # source shell kept (not rmdir'd over the leftover)
+        self.assertTrue((shell / "b.jpg").exists())          # the file that couldn't move stays in the shell
 
 
 if __name__ == "__main__":

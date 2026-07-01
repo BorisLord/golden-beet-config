@@ -1,5 +1,5 @@
-"""Shared media-probe cache. Reading each file's tags/duration/bitrate is the expensive part of the three
-pre-import source passes (dedup, sidecars.snapshot, upgrade) -- previously each walked the whole source and
+"""Shared media-probe cache. Reading each file's tags/duration/bitrate is the expensive part of the two
+pre-import source passes (dedup, upgrade) -- previously each walked the whole source and
 probed independently (dedup even probed twice per file). Probe once via mediafile, key on path+mtime+size,
 and persist: the same file is never re-read within a run NOR across runs (unchanged files are free)."""
 import json

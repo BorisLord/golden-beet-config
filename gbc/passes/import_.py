@@ -1,12 +1,11 @@
 """Pass 1 -- album match import (AcoustID + tags): source -> clean album lib.
 
 Branches on the EFFECTIVE beets import op (via `beetscfg`):
-  - source CONSUMED (move / copy+delete): dedup source, carry official sidecars into matched albums, sweep
-    the emptied shells.
-  - source PRESERVED (copy / reflink / hardlink / symlink / in-place): source is READ-ONLY -- dedup/sidecars/
-    prune all move source files, so they're skipped; the source is left untouched.
+  - source CONSUMED (move / copy+delete): dedup the source (keep the best copy), then sweep the emptied shells.
+  - source PRESERVED (copy / reflink / hardlink / symlink / in-place): source READ-ONLY -- dedup/prune skipped.
+Album extra files (booklet/scans/back art, .cue/.log, paired .lrc) ride along natively via the `filetote`
+plugin during import, in BOTH modes; fetchart owns the primary cover.
 """
-import tempfile
 from pathlib import Path
 
 from .. import artfix, beetscfg, sidecars
@@ -46,24 +45,18 @@ def run(cfg: Config, src=None, reimport=False) -> int:
         return 1
     artfix.run(cfg, src=src, log=log)          # strip mime=None WMA art so scrub can't crash beet import
     bi = beetscfg.read_import(cfg)
-    backup_db(cfg, "rebuild", log)
+    backup_db(cfg, "import", log)
 
     if bi.source_consumed:
-        cache = ProbeCache(cfg.beetsdir / "gbc-probe-cache.json")   # one probe/file, shared by dedup + snapshot
+        cache = ProbeCache(cfg.beetsdir / "gbc-probe-cache.json")   # one probe/file for dedup (upgrade reuses it)
         dedup(str(src), str(cfg.dump), True, log, cache=cache)      # best bitrate kept
-        snap = tempfile.NamedTemporaryFile(prefix="sidecars-", suffix=".json", delete=False).name  # noqa: SIM115
-        try:
-            sidecars.snapshot(str(src), snap, log, cache=cache)     # snapshot BEFORE import, while source has its audio
-            cache.save()                                            # persist after both source walks (one ffprobe each)
-            rc = _beet_import(cfg, src, reimport, log)
-            if rc == 0:                                 # only mutate the consumed source on a CLEAN import (else retry)
-                sidecars.apply(cfg, snap, str(cfg.dump), True, log)
-                sidecars.prune_shells(str(src), str(cfg.dump), True, log)
-                prune_empty_dirs(src)
-            else:
-                log.error("import rc=%d -> skip sidecars/prune; source left intact for the next run's retry", rc)
-        finally:
-            Path(snap).unlink(missing_ok=True)
+        cache.save()
+        rc = _beet_import(cfg, src, reimport, log)                  # filetote carries booklet/scans/.lrc/.cue/.log
+        if rc == 0:                                 # only mutate the consumed source on a CLEAN import (else retry)
+            sidecars.prune_shells(str(src), str(cfg.dump), True, log)
+            prune_empty_dirs(src)
+        else:
+            log.error("import rc=%d -> skip prune; source left intact for the next run's retry", rc)
     else:
         log.info("source preserved (beets import=%s) -> dedup/sidecars/prune skipped; source untouched", bi.label)
         rc = _beet_import(cfg, src, reimport, log)
