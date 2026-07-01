@@ -18,3 +18,5 @@ jobs:
         run: mise run typecheck
       - name: Unit tests
         run: mise run test
+      - name: Audit dependencies
+        run: mise run audit
